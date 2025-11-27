@@ -24,6 +24,8 @@ class ChannelManager {
     this.frontPageUrl = frontPageUrl;
     this.timezone = timezoneName;
     this.hydrationConcurrency = Math.max(1, hydrationConcurrency || DEFAULT_HYDRATION_CONCURRENCY);
+    this.playlistReady = false;
+    this.hydrationInProgress = false;
   }
 
   async buildChannels(events, selectedCategories = []) {
@@ -68,6 +70,8 @@ class ChannelManager {
 
     this.channels = newChannels;
     this.programmes = programmes;
+    this.playlistReady = false;
+    this.hydrationInProgress = false;
     if (!this.channels.length) {
       this.logger?.warn('No channels were created from events', { selectedCategories });
     }
@@ -90,7 +94,14 @@ class ChannelManager {
   }
 
   async hydrateStreams() {
-    if (!this.channels.length) return this.channels;
+    if (!this.channels.length) {
+      this.playlistReady = true;
+      this.hydrationInProgress = false;
+      return this.channels;
+    }
+
+    this.hydrationInProgress = true;
+    this.playlistReady = false;
 
     const workerCount = Math.min(this.hydrationConcurrency, this.channels.length);
     let currentIndex = 0;
@@ -116,6 +127,9 @@ class ChannelManager {
     };
 
     await Promise.all(Array.from({ length: workerCount }, worker));
+    this.hydrationInProgress = false;
+    this.playlistReady = true;
+    this.logger?.info('playlist.m3u8 is ready', { channelCount: this.channels.length });
     return this.channels;
   }
 
@@ -124,6 +138,8 @@ class ChannelManager {
     if (!channel) return null;
     channel.embedUrl = embedUrl;
     channel.streamUrl = null; // will be rehydrated on next run
+    this.playlistReady = false;
+    this.hydrationInProgress = false;
     this.logger?.info(`Updated source for ${channelId}`, { embedUrl });
     return channel;
   }
@@ -133,6 +149,8 @@ class ChannelManager {
     if (!channel) return null;
     channel.embedUrl = embedUrl;
     channel.streamUrl = null;
+    this.playlistReady = false;
+    this.hydrationInProgress = false;
     this.logger?.info(`Updated quality for ${channelId}`, { embedUrl });
     const result = await resolveStreamFromEmbed(embedUrl, this.logger);
     channel.streamUrl = result.streamUrl;
@@ -140,6 +158,11 @@ class ChannelManager {
   }
 
   generatePlaylist(baseUrl) {
+    if (!this.playlistReady) {
+      this.logger?.warn('Attempted to generate playlist before streams were hydrated');
+      return '#EXTM3U\n# Playlist is still hydrating';
+    }
+
     const lines = ['#EXTM3U'];
     this.channels
       .filter((ch) => ch.streamUrl)

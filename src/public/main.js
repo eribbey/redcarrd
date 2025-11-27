@@ -4,6 +4,8 @@ const state = {
   config: {},
   logsPaused: false,
   pendingLogs: 0,
+  playlistReady: false,
+  hydrating: false,
 };
 
 const logKeys = new Set();
@@ -14,9 +16,12 @@ async function fetchState() {
   const data = await res.json();
   state.channels = data.channels;
   state.config = data.config;
+  state.playlistReady = data.playlistReady;
+  state.hydrating = data.hydrating;
   renderConfig();
   renderChannels();
   syncLogs(data.logs);
+  renderPlaylistStatus();
 }
 
 function renderConfig() {
@@ -70,6 +75,26 @@ function renderChannels() {
 
     container.appendChild(node);
   });
+}
+
+function renderPlaylistStatus() {
+  const statusEl = document.getElementById('playlistStatus');
+  const playlistBtn = document.getElementById('playlistBtn');
+  if (!statusEl || !playlistBtn) return;
+
+  if (state.hydrating) {
+    statusEl.textContent = 'Resolving streams before building playlist...';
+    playlistBtn.disabled = true;
+    return;
+  }
+
+  if (state.playlistReady) {
+    statusEl.textContent = 'playlist.m3u8 is ready to download.';
+    playlistBtn.disabled = false;
+  } else {
+    statusEl.textContent = 'Waiting for streams to resolve before playlist is available.';
+    playlistBtn.disabled = true;
+  }
 }
 
 function fillSelect(select, options, current) {
