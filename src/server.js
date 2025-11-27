@@ -92,6 +92,32 @@ app.get('/api/state', (req, res) => {
   });
 });
 
+app.get('/api/logs/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  if (res.flushHeaders) {
+    res.flushHeaders();
+  }
+
+  const sendEntry = (entry) => {
+    res.write(`data: ${JSON.stringify(entry)}\n\n`);
+  };
+
+  logger
+    .getEntries()
+    .slice()
+    .reverse()
+    .forEach(sendEntry);
+
+  logger.on('entry', sendEntry);
+
+  req.on('close', () => {
+    logger.off('entry', sendEntry);
+  });
+});
+
 app.post('/api/config', (req, res) => {
   const { categories, rebuildIntervalMinutes, lifetimeHours, timezone } = req.body;
   config.categories = Array.isArray(categories) ? categories : config.categories;

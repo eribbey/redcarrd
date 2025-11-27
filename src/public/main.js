@@ -4,15 +4,17 @@ const state = {
   config: {},
 };
 
+const logKeys = new Set();
+let logStream = null;
+
 async function fetchState() {
   const res = await fetch('/api/state');
   const data = await res.json();
   state.channels = data.channels;
-  state.logs = data.logs;
   state.config = data.config;
   renderConfig();
   renderChannels();
-  renderLogs();
+  syncLogs(data.logs);
 }
 
 function renderConfig() {
@@ -99,6 +101,52 @@ function renderLogs() {
   document.getElementById('logs').textContent = logs;
 }
 
+function getLogKey(entry) {
+  return `${entry.timestamp}|${entry.level}|${entry.message}|${JSON.stringify(entry.meta || {})}`;
+}
+
+function addLogEntry(entry, { render = true } = {}) {
+  if (!entry || !entry.timestamp || !entry.level || !entry.message) return;
+  const key = getLogKey(entry);
+  if (logKeys.has(key)) return;
+
+  state.logs.unshift(entry);
+  logKeys.add(key);
+
+  if (state.logs.length > 500) {
+    const removed = state.logs.pop();
+    logKeys.delete(getLogKey(removed));
+  }
+
+  if (render) renderLogs();
+}
+
+function syncLogs(entries = []) {
+  entries
+    .slice()
+    .reverse()
+    .forEach((entry) => addLogEntry(entry, { render: false }));
+  renderLogs();
+}
+
+function startLogStream() {
+  if (logStream) logStream.close();
+  logStream = new EventSource('/api/logs/stream');
+  logStream.onmessage = (event) => {
+    try {
+      const entry = JSON.parse(event.data);
+      addLogEntry(entry);
+    } catch (error) {
+      console.error('Failed to parse log entry', error);
+    }
+  };
+
+  logStream.onerror = () => {
+    logStream.close();
+    setTimeout(startLogStream, 3000);
+  };
+}
+
 async function saveConfig(evt) {
   evt.preventDefault();
   const categories = document
@@ -131,4 +179,5 @@ document.getElementById('configForm').addEventListener('submit', saveConfig);
 document.getElementById('rebuildBtn').addEventListener('click', rebuild);
 
 fetchState();
+startLogStream();
 setInterval(fetchState, 15000);
