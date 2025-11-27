@@ -277,11 +277,21 @@ function collectOptions(root, selector, $ctx) {
   return root
     .find(selector)
     .toArray()
-    .map((opt) => ({
-      label: $ctx(opt).text().trim() || $ctx(opt).attr('value'),
-      embedUrl: $ctx(opt).attr('value'),
-    }))
-    .filter((opt) => opt.embedUrl);
+    .map((opt) => {
+      const $opt = $ctx(opt);
+      const embedUrl =
+        $opt.attr('data-url') ||
+        $opt.attr('data-src') ||
+        $opt.attr('data-href') ||
+        extractUrlFromOnclick($opt.attr('onclick')) ||
+        $opt.attr('value');
+
+      if (!embedUrl) return null;
+
+      const label = $opt.text().trim() || embedUrl;
+      return { label, embedUrl };
+    })
+    .filter(Boolean);
 }
 
 function buildEventsFromMatchesPayload(payload, timezoneName = 'UTC', logger, context = {}) {
@@ -503,15 +513,10 @@ async function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) 
 function parseEmbedPage(html, logger) {
   const $ = cheerio.load(html);
   const streamUrl = $('iframe#streamIframe, iframe[id*="streamIframe"]').attr('src');
-  const sourceOptions = $('#sourceSelect option, select[name*="source"] option')
-    .toArray()
-    .map((opt) => ({ label: $(opt).text().trim() || $(opt).attr('value'), embedUrl: $(opt).attr('value') }))
-    .filter((opt) => opt.embedUrl);
 
-  const qualityOptions = $('#qualitySelect option, select[name*="quality"] option')
-    .toArray()
-    .map((opt) => ({ label: $(opt).text().trim() || $(opt).attr('value'), embedUrl: $(opt).attr('value') }))
-    .filter((opt) => opt.embedUrl);
+  const sourceOptions = collectOptions($('body'), '#sourceSelect option, select[name*="source"] option', $);
+
+  const qualityOptions = collectOptions($('body'), '#qualitySelect option, select[name*="quality"] option', $);
 
   logger?.debug('Parsed embed page', { streamUrl, sourceOptions: sourceOptions.length, qualityOptions: qualityOptions.length });
   return { streamUrl, sourceOptions, qualityOptions };
