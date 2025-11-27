@@ -52,6 +52,15 @@ const matchesContentHtml = `
 </div>
 `;
 
+const embedHtmlWithOnclickOptions = `
+<div>
+  <select id="sourceSelect">
+    <option onclick="changeSource('/embed/stream1')">Primary</option>
+    <option data-url="/embed/stream2">Backup</option>
+  </select>
+</div>
+`;
+
 describe('scraper helpers', () => {
   test('parses front page events', async () => {
     nock('https://ntvstream.cx')
@@ -70,6 +79,11 @@ describe('scraper helpers', () => {
     expect(result.streamUrl).toContain('stream.m3u8');
     expect(result.sourceOptions[0].embedUrl).toContain('embed?a');
     expect(result.qualityOptions).toHaveLength(2);
+  });
+
+  test('parses embed options when value attribute is missing', () => {
+    const result = parseEmbedPage(embedHtmlWithOnclickOptions);
+    expect(result.sourceOptions.map((opt) => opt.embedUrl)).toEqual(['/embed/stream1', '/embed/stream2']);
   });
 
   test('parses matchesContent events and extracts scheduled time', async () => {
