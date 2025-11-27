@@ -22,12 +22,26 @@ class ChannelManager {
       ? events.filter((event) => selectedCategories.includes(event.category))
       : events;
 
-    this.logger?.info(`Rebuilding channels from ${filtered.length} events`);
+    if (!events?.length) {
+      this.logger?.warn('No events supplied to buildChannels');
+    }
+
+    const categoryCounts = filtered.reduce((acc, event) => {
+      const category = event.category || 'uncategorized';
+      acc[category] = (acc[category] || 0) + 1;
+      return acc;
+    }, {});
+
+    this.logger?.info(`Rebuilding channels from ${filtered.length} events`, {
+      selectedCategories,
+      categoryCounts,
+    });
 
     const grouped = filtered.reduce((acc, event) => {
-      const arr = acc[event.category] || [];
+      const category = event.category || 'uncategorized';
+      const arr = acc[category] || [];
       arr.push(event);
-      acc[event.category] = arr;
+      acc[category] = arr;
       return acc;
     }, {});
 
@@ -45,6 +59,10 @@ class ChannelManager {
 
     this.channels = newChannels;
     this.programmes = programmes;
+    if (!this.channels.length) {
+      this.logger?.warn('No channels were created from events', { selectedCategories });
+    }
+
     return this.channels;
   }
 
@@ -65,6 +83,7 @@ class ChannelManager {
   async hydrateStreams() {
     for (const channel of this.channels) {
       try {
+        this.logger?.debug('Resolving stream for channel', { id: channel.id, embedUrl: channel.embedUrl });
         const result = await resolveStreamFromEmbed(channel.embedUrl, this.logger);
         channel.streamUrl = result.streamUrl;
         channel.sourceOptions = result.sourceOptions?.length ? result.sourceOptions : channel.sourceOptions;
@@ -102,7 +121,9 @@ class ChannelManager {
     this.channels
       .filter((ch) => ch.streamUrl)
       .forEach((channel) => {
-        lines.push(`#EXTINF:-1 tvg-id="${channel.id}" group-title="${channel.category}",${channel.category} ${this.extractIndex(channel.id)}`);
+        lines.push(
+          `#EXTINF:-1 tvg-id="${channel.id}" group-title="${channel.category}",${channel.category} ${this.extractIndex(channel.id)}`,
+        );
         lines.push(channel.streamUrl);
       });
     return lines.join('\n');

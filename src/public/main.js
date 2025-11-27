@@ -91,7 +91,10 @@ function fillSelect(select, options, current) {
 
 function renderLogs() {
   const logs = state.logs
-    .map((l) => `[${l.timestamp}] [${l.level.toUpperCase()}] ${l.message}`)
+    .map((l) => {
+      const metaText = l.meta && Object.keys(l.meta || {}).length ? ` ${JSON.stringify(l.meta)}` : '';
+      return `[${l.timestamp}] [${l.level.toUpperCase()}] ${l.message}${metaText}`;
+    })
     .join('\n');
   document.getElementById('logs').textContent = logs;
 }

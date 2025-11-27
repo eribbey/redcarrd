@@ -17,7 +17,8 @@ class Logger {
     if (this.entries.length > this.limit) {
       this.entries = this.entries.slice(0, this.limit);
     }
-    console[level === 'error' ? 'error' : 'log'](`[${entry.timestamp}] [${level.toUpperCase()}] ${message}`);
+    const metaText = meta && Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : '';
+    console[level === 'error' ? 'error' : 'log'](`[${entry.timestamp}] [${level.toUpperCase()}] ${message}${metaText}`);
     return entry;
   }
 
