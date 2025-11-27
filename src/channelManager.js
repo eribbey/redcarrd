@@ -7,14 +7,23 @@ const { resolveStreamFromEmbed, createProgrammeFromEvent } = require('./scraper'
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
+const DEFAULT_HYDRATION_CONCURRENCY = 5;
+
 class ChannelManager {
-  constructor({ lifetimeHours = 24, logger, frontPageUrl, timezoneName = 'UTC' }) {
+  constructor({
+    lifetimeHours = 24,
+    logger,
+    frontPageUrl,
+    timezoneName = 'UTC',
+    hydrationConcurrency = DEFAULT_HYDRATION_CONCURRENCY,
+  }) {
     this.channels = [];
     this.programmes = [];
     this.lifetimeHours = lifetimeHours;
     this.logger = logger;
     this.frontPageUrl = frontPageUrl;
     this.timezone = timezoneName;
+    this.hydrationConcurrency = Math.max(1, hydrationConcurrency || DEFAULT_HYDRATION_CONCURRENCY);
   }
 
   async buildChannels(events, selectedCategories = []) {
@@ -81,18 +90,32 @@ class ChannelManager {
   }
 
   async hydrateStreams() {
-    for (const channel of this.channels) {
-      try {
-        this.logger?.debug('Resolving stream for channel', { id: channel.id, embedUrl: channel.embedUrl });
-        const result = await resolveStreamFromEmbed(channel.embedUrl, this.logger);
-        channel.streamUrl = result.streamUrl;
-        channel.sourceOptions = result.sourceOptions?.length ? result.sourceOptions : channel.sourceOptions;
-        channel.qualityOptions = result.qualityOptions?.length ? result.qualityOptions : channel.qualityOptions;
-        this.logger?.info(`Resolved stream for channel ${channel.id}`, { streamUrl: channel.streamUrl });
-      } catch (error) {
-        this.logger?.warn(`Failed to resolve stream for ${channel.id}`, { error: error.message });
+    if (!this.channels.length) return this.channels;
+
+    const workerCount = Math.min(this.hydrationConcurrency, this.channels.length);
+    let currentIndex = 0;
+
+    const worker = async () => {
+      while (true) {
+        const index = currentIndex;
+        currentIndex += 1;
+        const channel = this.channels[index];
+        if (!channel) break;
+
+        try {
+          this.logger?.debug('Resolving stream for channel', { id: channel.id, embedUrl: channel.embedUrl });
+          const result = await resolveStreamFromEmbed(channel.embedUrl, this.logger);
+          channel.streamUrl = result.streamUrl;
+          channel.sourceOptions = result.sourceOptions?.length ? result.sourceOptions : channel.sourceOptions;
+          channel.qualityOptions = result.qualityOptions?.length ? result.qualityOptions : channel.qualityOptions;
+          this.logger?.info(`Resolved stream for channel ${channel.id}`, { streamUrl: channel.streamUrl });
+        } catch (error) {
+          this.logger?.warn(`Failed to resolve stream for ${channel.id}`, { error: error.message });
+        }
       }
-    }
+    };
+
+    await Promise.all(Array.from({ length: workerCount }, worker));
     return this.channels;
   }
 

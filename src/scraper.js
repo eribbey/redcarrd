@@ -39,6 +39,8 @@ async function fetchHtml(url, logger) {
   return response.data;
 }
 
+const BLOCKED_HOSTS = ['google.com', 'www.google.com', 'pagead2.googlesyndication.com'];
+
 async function fetchRenderedHtml(url, logger, options = {}) {
   const { capturePageData = false, waitForMatches = true } = options;
   const normalizedUrl = normalizeUrl(url);
@@ -60,6 +62,24 @@ async function fetchRenderedHtml(url, logger, options = {}) {
       viewport: { width: 1366, height: 768 },
     });
 
+    await context.route('**/*', (route) => {
+      const requestUrl = route.request().url();
+      let hostname;
+      try {
+        hostname = new URL(requestUrl).hostname;
+      } catch (error) {
+        logger?.warn('Blocking malformed request while rendering', { url: normalizedUrl, requestUrl });
+        return route.abort();
+      }
+
+      if (BLOCKED_HOSTS.some((host) => hostname === host || hostname.endsWith(`.${host}`))) {
+        logger?.debug('Blocked third-party request while rendering', { url: normalizedUrl, requestUrl });
+        return route.abort();
+      }
+
+      return route.continue();
+    });
+
     const page = await context.newPage();
     page.on('console', (message) => {
       logger?.warn('Page console output', {
@@ -70,7 +90,8 @@ async function fetchRenderedHtml(url, logger, options = {}) {
     });
 
     page.on('pageerror', (error) => {
-      logger?.error('Page error during render', {
+      const level = /clientWidth/i.test(error.message) ? 'warn' : 'error';
+      logger?.[level]('Page error during render', {
         url: normalizedUrl,
         message: error.message,
         stack: error.stack,
@@ -89,10 +110,16 @@ async function fetchRenderedHtml(url, logger, options = {}) {
     });
 
     page.on('requestfailed', (request) => {
-      logger?.error('Request failed while rendering', {
+      const failure = request.failure()?.errorText;
+      const responseUrl = request.url();
+      const isMainFrame = request.frame() === page.mainFrame();
+      const level = isMainFrame ? 'error' : 'warn';
+
+      logger?.[level]('Request failed while rendering', {
         url: normalizedUrl,
-        failure: request.failure()?.errorText,
-        responseUrl: request.url(),
+        failure,
+        responseUrl,
+        mainFrame: isMainFrame,
       });
     });
     await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
