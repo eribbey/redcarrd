@@ -24,11 +24,18 @@ async function fetchRenderedHtml(url, logger) {
   const browser = await chromium.launch({ headless: true });
   try {
     const context = await browser.newContext({
-      userAgent: 'redcarrd-proxy/1.0',
+      // Use a realistic user agent to ensure the page sends full JS-driven content.
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      viewport: { width: 1366, height: 768 },
     });
+
     const page = await context.newPage();
-    await page.goto(normalizedUrl, { waitUntil: 'networkidle' });
-    await page.waitForTimeout(500);
+    await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
+    await page.waitForLoadState('networkidle');
+    // Give client-side scripts enough time to hydrate dynamic content and iframes.
+    await page.waitForTimeout(2000);
+
     const content = await page.content();
     logger?.debug('Rendered HTML fetched', { url: normalizedUrl, length: content.length });
     return content;
