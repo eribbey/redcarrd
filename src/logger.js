@@ -25,6 +25,10 @@ class Logger {
     return this.log('info', message, meta);
   }
 
+  debug(message, meta) {
+    return this.log('debug', message, meta);
+  }
+
   warn(message, meta) {
     return this.log('warn', message, meta);
   }
