@@ -53,8 +53,12 @@ const matchesContentHtml = `
 `;
 
 describe('scraper helpers', () => {
-  test('parses front page events', () => {
-    const events = parseFrontPage(frontPageHtml);
+  test('parses front page events', async () => {
+    nock('https://ntvstream.cx')
+      .get('/embed?c')
+      .reply(200, '<iframe id="streamPlayer" src="https://ntvstream.cx/embed?c"></iframe>');
+
+    const events = await parseFrontPage(frontPageHtml);
     expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({ category: 'football', title: 'Match A' });
     expect(events[0].sourceOptions).toHaveLength(2);
@@ -68,9 +72,9 @@ describe('scraper helpers', () => {
     expect(result.qualityOptions).toHaveLength(2);
   });
 
-  test('parses matchesContent events and extracts scheduled time', () => {
+  test('parses matchesContent events and extracts scheduled time', async () => {
     const timezoneName = 'Europe/London';
-    const events = parseFrontPage(matchesContentHtml, timezoneName);
+    const events = await parseFrontPage(matchesContentHtml, timezoneName);
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       category: 'football',
@@ -82,6 +86,22 @@ describe('scraper helpers', () => {
     const eventTime = dayjs(events[0].startTime).tz(timezoneName);
     expect(eventTime.hour()).toBe(13);
     expect(eventTime.minute()).toBe(30);
+  });
+
+  test('fetches embedUrl from onclick target when no embed is present on the card', async () => {
+    const onclickOnlyHtml = `
+    <div class="match-card" data-category="football" onclick="openMatch('/embedded/xyz')">
+      <div class="match-title">Onclick Only</div>
+    </div>`;
+
+    nock('https://ntvstream.cx').get('/embedded/xyz').reply(
+      200,
+      '<iframe id="streamPlayer" src="https://ntvstream.cx/embed/xyz"></iframe>',
+    );
+
+    const events = await parseFrontPage(onclickOnlyHtml, 'UTC');
+    expect(events).toHaveLength(1);
+    expect(events[0].embedUrl).toBe('https://ntvstream.cx/embed/xyz');
   });
 
   test('resolves stream from embed via HTTP', async () => {
