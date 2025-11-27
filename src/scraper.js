@@ -11,7 +11,23 @@ dayjs.extend(timezone);
 
 function normalizeUrl(url = '') {
   const trimmed = url.trim();
-  return trimmed.startsWith('http') ? trimmed : `https://${trimmed.replace(/^\/\//, '')}`;
+  if (!trimmed) return '';
+
+  const baseUrl = process.env.FRONT_PAGE_URL || 'https://ntvstream.cx';
+
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith('//')) return `https:${trimmed}`;
+  if (trimmed.startsWith('/')) return new URL(trimmed, baseUrl).toString();
+
+  try {
+    if (/^[\w.-]+\.[a-z]{2,}/i.test(trimmed)) {
+      return new URL(`https://${trimmed.replace(/^\/\//, '')}`).toString();
+    }
+
+    return new URL(trimmed, baseUrl).toString();
+  } catch (error) {
+    return `https://${trimmed.replace(/^\/\//, '')}`;
+  }
 }
 
 async function fetchHtml(url, logger) {
