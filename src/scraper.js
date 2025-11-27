@@ -154,6 +154,7 @@ async function fetchRenderedHtml(url, logger, options = {}) {
 
     logger?.debug('Rendered HTML selector diagnostics', {
       url: normalizedUrl,
+      matchCardCount: $('.match-card').length,
       matchesContentCount: $('#matchesContent').length,
       iframeCount: $(iframeSelector).length,
       sourceOptionCount: $(sourceSelector).length,
@@ -208,6 +209,13 @@ function parseEventTime(text, timezoneName = 'UTC') {
   }
 
   return candidate.toDate();
+}
+
+function extractEmbedUrlFromOnclick(onclickValue) {
+  if (!onclickValue || typeof onclickValue !== 'string') return null;
+
+  const urlMatch = onclickValue.match(/https?:\/\/[^'"\s)]+/i);
+  return urlMatch ? urlMatch[0] : null;
 }
 
 function collectOptions(root, selector, $ctx) {
@@ -311,6 +319,8 @@ function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
 
   const matchesContent = $('#matchesContent');
   const matchesContentCount = matchesContent.length;
+  const matchCards = $('.match-card');
+  const matchCardCount = matchCards.length;
   const iframeCount = $(iframeSelector).length;
   const sourceOptionCount = $(sourceSelector).length;
   const qualityOptionCount = $(qualitySelector).length;
@@ -320,35 +330,36 @@ function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
     timezone: timezoneName,
     matchesContentFound: matchesContentCount > 0,
     matchesContentCount,
+    matchCardCount,
     iframeCount,
     sourceOptionCount,
     qualityOptionCount,
   });
 
-  let eventsFromMatches = 0;
+  let eventsFromMatchCards = 0;
   let eventsFromCandidates = 0;
   let eventsFromLooseIframes = 0;
-  if (matchesContent.length) {
-    matchesContent.find('.match-title').each((index, titleEl) => {
-      const el = $(titleEl);
-      const wrapper = el.closest('[data-category], .match, .event, li, article, .card');
-      const title = (el.text() || `Event ${index + 1}`).trim();
-      const category = (wrapper.attr('data-category') || 'general').trim().toLowerCase();
+  if (matchCards.length) {
+    matchCards.each((index, cardEl) => {
+      const el = $(cardEl);
+      const title = (el.find('.match-title').first().text() || `Event ${index + 1}`).trim();
+      const category = (el.attr('data-category') || 'general').toString().trim().toLowerCase();
       const embedUrl =
-        wrapper.find('iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]').first().attr('src') ||
-        el.attr('href') ||
-        el.data('src') ||
-        wrapper.find('[data-src]').attr('data-src') ||
-        wrapper.find('[data-url]').attr('data-url');
+        extractEmbedUrlFromOnclick(el.attr('onclick')) ||
+        el.find('a.match-title[href]').attr('href') ||
+        el.find('iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]').first().attr('src') ||
+        el.find('[data-src]').attr('data-src') ||
+        el.find('[data-url]').attr('data-url');
+
       if (!embedUrl || seen.has(embedUrl)) return;
 
-      const sourceOptions = collectOptions(wrapper, '#sourceSelect option, select[name*="source"] option', $);
-      const qualityOptions = collectOptions(wrapper, '#qualitySelect option, select[name*="quality"] option', $);
-      const startTime = parseEventTime(wrapper.find('.time-badge').first().text(), timezoneName);
+      const sourceOptions = collectOptions(el, '#sourceSelect option, select[name*="source"] option', $);
+      const qualityOptions = collectOptions(el, '#qualitySelect option, select[name*="quality"] option', $);
+      const startTime = parseEventTime(el.find('.time-badge').first().text(), timezoneName);
 
       events.push({ title, category, embedUrl, sourceOptions, qualityOptions, startTime });
       seen.add(embedUrl);
-      eventsFromMatches += 1;
+      eventsFromMatchCards += 1;
     });
   }
 
@@ -402,6 +413,7 @@ function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
       logger?.warn('No events parsed from front page', {
         url: normalizedUrl,
         timezone: timezoneName,
+        matchCardCount,
         matchesContentCount,
         iframeCount,
         sourceOptionCount,
@@ -421,7 +433,7 @@ function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
     url: normalizedUrl,
     timezone: timezoneName,
     count: events.length,
-    eventsFromMatches,
+    eventsFromMatchCards,
     eventsFromCandidates,
     eventsFromLooseIframes,
   });

@@ -10,24 +10,21 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 const frontPageHtml = `
-<ul>
-  <li data-category="football">
-    <h3>Match A</h3>
-    <iframe id="streamPlayer" src="https://ntvstream.cx/embed?a"></iframe>
-    <select id="sourceSelect">
-      <option value="https://ntvstream.cx/embed?a">Source A</option>
-      <option value="https://ntvstream.cx/embed?b">Source B</option>
-    </select>
-    <select id="qualitySelect">
-      <option value="https://ntvstream.cx/embed?a&quality=720">720p</option>
-      <option value="https://ntvstream.cx/embed?a&quality=480">480p</option>
-    </select>
-  </li>
-  <li data-category="basketball">
-    <h3>Match B</h3>
-    <iframe id="streamPlayer" src="https://ntvstream.cx/embed?c"></iframe>
-  </li>
-</ul>
+<div class="match-card" data-category="football" onclick="openMatch('https://ntvstream.cx/embed?a')">
+  <div class="match-title">Match A</div>
+  <select id="sourceSelect">
+    <option value="https://ntvstream.cx/embed?a">Source A</option>
+    <option value="https://ntvstream.cx/embed?b">Source B</option>
+  </select>
+  <select id="qualitySelect">
+    <option value="https://ntvstream.cx/embed?a&quality=720">720p</option>
+    <option value="https://ntvstream.cx/embed?a&quality=480">480p</option>
+  </select>
+</div>
+<div class="match-card" data-category="basketball" onclick="openMatch('https://ntvstream.cx/embed?c')">
+  <div class="match-title">Match B</div>
+  <span class="time-badge">10:00</span>
+</div>
 `;
 
 const embedHtml = `
@@ -45,10 +42,9 @@ const embedHtml = `
 
 const matchesContentHtml = `
 <div id="matchesContent">
-  <div class="match" data-category="football">
-    <a class="match-title" href="https://ntvstream.cx/embed?d">Team A vs Team B</a>
+  <div class="match-card" data-category="football" onclick="watchMatch('https://ntvstream.cx/embed?d')">
+    <div class="match-title">Team A vs Team B</div>
     <span class="time-badge">13:30</span>
-    <iframe id="streamPlayer" src="https://ntvstream.cx/embed?d"></iframe>
     <select id="sourceSelect">
       <option value="https://ntvstream.cx/embed?d">Main</option>
     </select>
