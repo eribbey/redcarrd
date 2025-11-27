@@ -18,10 +18,11 @@ describe('scraper playwright end-to-end', () => {
           setTimeout(() => {
             const container = document.querySelector('#matchesContent');
             const match = document.createElement('div');
-            match.className = 'match';
+            match.className = 'match-card';
             match.dataset.category = 'football';
+            match.setAttribute('onclick', "openMatch('${baseUrl}/embed/stream1')");
 
-            const title = document.createElement('h3');
+            const title = document.createElement('div');
             title.className = 'match-title';
             title.textContent = 'Playwright Fixture Match';
             match.appendChild(title);

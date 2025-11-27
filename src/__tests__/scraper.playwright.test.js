@@ -16,8 +16,8 @@ describe('scraper rendering integration', () => {
     <html>
       <body>
         <div id="matchesContent">
-          <div class="match" data-category="football">
-            <h3 class="match-title">Dynamic Match</h3>
+          <div class="match-card" data-category="football" onclick="openMatch('/embed/stream1')">
+            <div class="match-title">Dynamic Match</div>
             <span class="time-badge">11:45 AM</span>
             <div id="dynamic-container"></div>
           </div>
