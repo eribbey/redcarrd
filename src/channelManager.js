@@ -1,14 +1,20 @@
 const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const timezone = require('dayjs/plugin/timezone');
 const { create } = require('xmlbuilder');
 const { resolveStreamFromEmbed, createProgrammeFromEvent } = require('./scraper');
 
+dayjs.extend(utc);
+dayjs.extend(timezone);
+
 class ChannelManager {
-  constructor({ lifetimeHours = 24, logger, frontPageUrl }) {
+  constructor({ lifetimeHours = 24, logger, frontPageUrl, timezoneName = 'UTC' }) {
     this.channels = [];
     this.programmes = [];
     this.lifetimeHours = lifetimeHours;
     this.logger = logger;
     this.frontPageUrl = frontPageUrl;
+    this.timezone = timezoneName;
   }
 
   async buildChannels(events, selectedCategories = []) {
@@ -33,7 +39,7 @@ class ChannelManager {
         const id = `${category}-${index + 1}`;
         const channel = this.createChannel(id, category, event);
         newChannels.push(channel);
-        programmes.push(createProgrammeFromEvent(event, id, this.lifetimeHours));
+        programmes.push(createProgrammeFromEvent(event, id, this.lifetimeHours, this.timezone));
       });
     }
 
@@ -122,8 +128,8 @@ class ChannelManager {
     this.programmes.forEach((programme) => {
       xml
         .ele('programme', {
-          start: dayjs(programme.start).format('YYYYMMDDHHmmss ZZ'),
-          stop: dayjs(programme.stop).format('YYYYMMDDHHmmss ZZ'),
+          start: dayjs(programme.start).tz(this.timezone).format('YYYYMMDDHHmmss ZZ'),
+          stop: dayjs(programme.stop).tz(this.timezone).format('YYYYMMDDHHmmss ZZ'),
           channel: programme.channelId,
         })
         .ele('title')
