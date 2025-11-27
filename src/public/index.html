@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Redcarrd IPTV Proxy</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Redcarrd IPTV Proxy</h1>
+      <p class="muted">Self-hosted IPTV playlist and EPG builder for ntvstream.cx</p>
+    </header>
+
+    <main>
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Configuration</h2>
+            <p class="muted">Select categories and refresh cadence</p>
+          </div>
+          <button id="rebuildBtn" class="primary">Rebuild now</button>
+        </div>
+        <form id="configForm" class="config-grid">
+          <label>
+            Categories
+            <input id="categories" type="text" placeholder="football,basketball" />
+            <small>Comma-separated list. Leave empty to include everything.</small>
+          </label>
+          <label>
+            Rebuild interval (minutes)
+            <input id="interval" type="number" min="5" step="5" />
+          </label>
+          <label>
+            Lifetime (hours)
+            <input id="lifetime" type="number" min="1" step="1" />
+          </label>
+          <button type="submit" class="secondary">Save configuration</button>
+        </form>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Channels</h2>
+            <p class="muted">Preview and adjust stream source or quality</p>
+          </div>
+          <div class="links">
+            <a href="/playlist.m3u8" target="_blank">Download playlist.m3u8</a>
+            <a href="/epg.xml" target="_blank">Download EPG</a>
+          </div>
+        </div>
+        <div id="channels" class="channel-grid"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <div>
+            <h2>Logs</h2>
+            <p class="muted">Latest activity from scraper and proxy</p>
+          </div>
+        </div>
+        <pre id="logs" class="logs"></pre>
+      </section>
+    </main>
+
+    <template id="channelTemplate">
+      <div class="channel-card">
+        <div class="channel-title"></div>
+        <div class="muted channel-meta"></div>
+        <div class="controls">
+          <label>Source
+            <select class="source"></select>
+          </label>
+          <label>Quality
+            <select class="quality"></select>
+          </label>
+        </div>
+        <div class="preview">
+          <a class="preview-link" href="#" target="_blank">Preview stream</a>
+        </div>
+      </div>
+    </template>
+
+    <script src="/main.js"></script>
+  </body>
+</html>
