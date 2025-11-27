@@ -6,6 +6,9 @@ const fs = require('fs');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
 
+const DEFAULT_STREAM_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
@@ -57,8 +60,7 @@ async function fetchRenderedHtml(url, logger, options = {}) {
   try {
     const context = await browser.newContext({
       // Use a realistic user agent to ensure the page sends full JS-driven content.
-      userAgent:
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      userAgent: DEFAULT_STREAM_UA,
       viewport: { width: 1366, height: 768 },
     });
 
@@ -148,6 +150,34 @@ async function fetchRenderedHtml(url, logger, options = {}) {
 
     // Give client-side scripts enough time to hydrate dynamic content and iframes.
     await page.waitForTimeout(2000);
+
+    if (captureStreams) {
+      try {
+        await page.evaluate(() => {
+          const video = document.querySelector('video');
+          if (video) {
+            video.muted = true;
+            video.play?.();
+          }
+
+          const playButtons = Array.from(
+            document.querySelectorAll('.vjs-big-play-button, .plyr__control, button[type="button"], button'),
+          );
+          playButtons.slice(0, 2).forEach((button) => {
+            try {
+              button.click();
+            } catch (error) {
+              // Ignore click failures silently to keep scraping resilient.
+            }
+          });
+        });
+
+        // Allow time for the player to request manifests/segments after the play attempt.
+        await page.waitForTimeout(1500);
+      } catch (error) {
+        logger?.debug('Failed to trigger playback during render', { url: normalizedUrl, error: error.message });
+      }
+    }
 
     let pageData = null;
     if (capturePageData) {
@@ -360,6 +390,21 @@ function collectStreamCandidates($ctx, html = '') {
   }
 
   return Array.from(candidates);
+}
+
+function buildDefaultStreamHeaders(embedUrl) {
+  const headers = { 'User-Agent': DEFAULT_STREAM_UA, Accept: '*/*' };
+
+  if (embedUrl) {
+    headers.Referer = normalizeUrl(embedUrl);
+    try {
+      headers.Origin = new URL(headers.Referer).origin;
+    } catch (error) {
+      // Ignore origin derivation errors.
+    }
+  }
+
+  return headers;
 }
 
 function buildEventsFromMatchesPayload(payload, timezoneName = 'UTC', logger, context = {}) {
@@ -611,14 +656,16 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
     const payload = useRenderer
       ? await fetchRenderedHtml(normalizedUrl, logger, { captureStreams: true, waitForMatches: false })
       : await fetchHtml(normalizedUrl, logger);
-    return parseEmbedPage(payload, logger);
+    const parsed = parseEmbedPage(payload, logger);
+    return { ...parsed, requestHeaders: buildDefaultStreamHeaders(normalizedUrl) };
   } catch (error) {
     logger?.error('Failed to resolve stream from embed', { url: normalizedUrl, error: error.message });
 
     if (useRenderer) {
       logger?.warn('Falling back to non-rendered fetch for embed', { url: normalizedUrl });
       const html = await fetchHtml(normalizedUrl, logger);
-      return parseEmbedPage(html, logger);
+      const parsed = parseEmbedPage(html, logger);
+      return { ...parsed, requestHeaders: buildDefaultStreamHeaders(normalizedUrl) };
     }
 
     throw error;
@@ -673,4 +720,5 @@ module.exports = {
   resolveStreamFromEmbed,
   scrapeFrontPage,
   createProgrammeFromEvent,
+  buildDefaultStreamHeaders,
 };

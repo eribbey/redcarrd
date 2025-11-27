@@ -2,7 +2,8 @@ const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
 const { create } = require('xmlbuilder');
-const { resolveStreamFromEmbed, createProgrammeFromEvent } = require('./scraper');
+const axios = require('axios');
+const { resolveStreamFromEmbed, createProgrammeFromEvent, buildDefaultStreamHeaders } = require('./scraper');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -87,6 +88,7 @@ class ChannelManager {
       title: event.title,
       embedUrl: event.embedUrl,
       streamUrl: event.streamUrl || null,
+      requestHeaders: event.requestHeaders || buildDefaultStreamHeaders(event.embedUrl),
       sourceOptions: event.sourceOptions || [],
       qualityOptions: event.qualityOptions || [],
       expiresAt,
@@ -117,6 +119,7 @@ class ChannelManager {
           this.logger?.debug('Resolving stream for channel', { id: channel.id, embedUrl: channel.embedUrl });
           const result = await resolveStreamFromEmbed(channel.embedUrl, this.logger);
           channel.streamUrl = result.streamUrl;
+          channel.requestHeaders = result.requestHeaders || channel.requestHeaders;
           channel.sourceOptions = result.sourceOptions?.length ? result.sourceOptions : channel.sourceOptions;
           channel.qualityOptions = result.qualityOptions?.length ? result.qualityOptions : channel.qualityOptions;
           this.logger?.info(`Resolved stream for channel ${channel.id}`, { streamUrl: channel.streamUrl });
@@ -138,6 +141,7 @@ class ChannelManager {
     if (!channel) return null;
     channel.embedUrl = embedUrl;
     channel.streamUrl = null; // will be rehydrated on next run
+    channel.requestHeaders = buildDefaultStreamHeaders(embedUrl);
     this.playlistReady = false;
     this.hydrationInProgress = false;
     this.logger?.info(`Updated source for ${channelId}`, { embedUrl });
@@ -149,11 +153,13 @@ class ChannelManager {
     if (!channel) return null;
     channel.embedUrl = embedUrl;
     channel.streamUrl = null;
+    channel.requestHeaders = buildDefaultStreamHeaders(embedUrl);
     this.playlistReady = false;
     this.hydrationInProgress = false;
     this.logger?.info(`Updated quality for ${channelId}`, { embedUrl });
     const result = await resolveStreamFromEmbed(embedUrl, this.logger);
     channel.streamUrl = result.streamUrl;
+    channel.requestHeaders = result.requestHeaders || channel.requestHeaders;
     return channel;
   }
 
@@ -170,7 +176,7 @@ class ChannelManager {
         lines.push(
           `#EXTINF:-1 tvg-id="${channel.id}" group-title="${channel.category}",${channel.category} ${this.extractIndex(channel.id)}`,
         );
-        lines.push(channel.streamUrl);
+        lines.push(`${baseUrl}/hls/${encodeURIComponent(channel.id)}`);
       });
     return lines.join('\n');
   }
@@ -209,6 +215,55 @@ class ChannelManager {
     });
 
     return xml.end({ pretty: true });
+  }
+
+  getChannelById(id) {
+    return this.channels.find((channel) => channel.id === id);
+  }
+
+  buildStreamHeaders(channel) {
+    const headers = { ...buildDefaultStreamHeaders(channel?.embedUrl), ...(channel?.requestHeaders || {}) };
+
+    if (!headers.Referer && channel?.embedUrl) headers.Referer = channel.embedUrl;
+    if (!headers.Origin && channel?.embedUrl) {
+      try {
+        headers.Origin = new URL(channel.embedUrl).origin;
+      } catch (error) {
+        // ignore
+      }
+    }
+
+    return headers;
+  }
+
+  async fetchStream(channel, targetUrl) {
+    const headers = this.buildStreamHeaders(channel);
+    this.logger?.debug('Proxying stream fetch', { channelId: channel?.id, targetUrl });
+
+    return axios.get(targetUrl, {
+      headers,
+      responseType: 'arraybuffer',
+      validateStatus: (status) => status >= 200 && status < 500,
+    });
+  }
+
+  rewriteManifest(manifestBody, manifestUrl, baseProxyUrl) {
+    const lines = manifestBody.split(/\r?\n/);
+    const rewritten = lines.map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) return line;
+
+      let absolute;
+      try {
+        absolute = new URL(trimmed, manifestUrl).toString();
+      } catch (error) {
+        return line;
+      }
+
+      return `${baseProxyUrl}/proxy?url=${encodeURIComponent(absolute)}`;
+    });
+
+    return rewritten.join('\n');
   }
 }
 

@@ -26,6 +26,7 @@ describe('ChannelManager', () => {
         title: 'A',
         embedUrl: 'https://example.com/embed/a',
         streamUrl: 'https://cdn.example.com/a.m3u8',
+        requestHeaders: { Referer: 'https://example.com/embed/a' },
         sourceOptions: [],
         qualityOptions: [],
         expiresAt: new Date().toISOString(),
@@ -43,7 +44,7 @@ describe('ChannelManager', () => {
     manager.playlistReady = true;
     const playlist = manager.generatePlaylist('http://localhost:3005');
     expect(playlist).toContain('#EXTM3U');
-    expect(playlist).toContain('cdn.example.com');
+    expect(playlist).toContain('/hls/football-1');
 
     const epg = manager.generateEpg();
     expect(epg).toContain('<tv>');

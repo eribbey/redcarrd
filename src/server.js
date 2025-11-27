@@ -161,6 +161,66 @@ app.get('/playlist.m3u8', (req, res) => {
   res.send(channelManager.generatePlaylist(`${req.protocol}://${req.get('host')}`));
 });
 
+function isHlsContentType(contentType = '') {
+  return /application\/(vnd\.apple\.mpegurl|x-mpegURL|mpegurl)/i.test(contentType);
+}
+
+function buildProxyBaseUrl(req, channelId) {
+  return `${req.protocol}://${req.get('host')}/hls/${encodeURIComponent(channelId)}`;
+}
+
+async function handleHlsResponse(req, res, targetUrl, channel, isRootManifest = false) {
+  try {
+    const response = await channelManager.fetchStream(channel, targetUrl);
+
+    const contentType = response.headers['content-type'] || 'application/octet-stream';
+    const shouldRewrite = isRootManifest || isHlsContentType(contentType) || targetUrl.includes('.m3u8');
+
+    if (shouldRewrite) {
+      const manifest = response.data?.toString('utf8') || '';
+      const proxyBase = buildProxyBaseUrl(req, channel.id);
+      const rewritten = channelManager.rewriteManifest(manifest, targetUrl, proxyBase);
+      res.set('Content-Type', 'application/vnd.apple.mpegurl');
+      return res.send(rewritten);
+    }
+
+    res.set('Content-Type', contentType);
+    return res.send(response.data);
+  } catch (error) {
+    logger.error('Failed to proxy HLS request', {
+      channelId: channel?.id,
+      targetUrl,
+      status: error.response?.status,
+      message: error.message,
+    });
+    return res.status(502).send('Upstream error fetching stream');
+  }
+}
+
+app.get('/hls/:id', async (req, res) => {
+  const channel = channelManager.getChannelById(req.params.id);
+  if (!channel || !channel.streamUrl) {
+    return res.status(404).send('Channel not found or stream unavailable');
+  }
+
+  return handleHlsResponse(req, res, channel.streamUrl, channel, true);
+});
+
+app.get('/hls/:id/proxy', async (req, res) => {
+  const channel = channelManager.getChannelById(req.params.id);
+  const targetUrl = req.query.url;
+
+  if (!channel || !channel.streamUrl) {
+    return res.status(404).send('Channel not found or stream unavailable');
+  }
+
+  if (!targetUrl) {
+    return res.status(400).send('Missing url parameter');
+  }
+
+  return handleHlsResponse(req, res, targetUrl, channel, false);
+});
+
 app.get('/epg.xml', (req, res) => {
   res.set('Content-Type', 'application/xml');
   res.send(channelManager.generateEpg());
