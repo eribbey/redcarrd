@@ -211,11 +211,50 @@ function parseEventTime(text, timezoneName = 'UTC') {
   return candidate.toDate();
 }
 
-function extractEmbedUrlFromOnclick(onclickValue) {
+function extractUrlFromOnclick(onclickValue) {
   if (!onclickValue || typeof onclickValue !== 'string') return null;
+
+  const quotedMatch = onclickValue.match(/["']([^"']+)["']/);
+  if (quotedMatch?.[1]) return quotedMatch[1];
 
   const urlMatch = onclickValue.match(/https?:\/\/[^'"\s)]+/i);
   return urlMatch ? urlMatch[0] : null;
+}
+
+function normalizeOnclickTarget(onclickUrl) {
+  if (!onclickUrl) return null;
+  const trimmed = onclickUrl.trim();
+  if (/^https?:\/\//i.test(trimmed)) return normalizeUrl(trimmed);
+  const path = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  return normalizeUrl(`ntvstream.cx${path}`);
+}
+
+async function resolveEmbedFromOnclick(onclickValue, logger) {
+  const rawUrl = extractUrlFromOnclick(onclickValue);
+  if (!rawUrl) return null;
+
+  const targetUrl = normalizeOnclickTarget(rawUrl);
+  if (!targetUrl) return null;
+
+  try {
+    const html = await fetchHtml(targetUrl, logger);
+    const $ = cheerio.load(html || '');
+    const embedUrl =
+      $('iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]').first().attr('src') ||
+      $('[data-src]').attr('data-src') ||
+      $('[data-url]').attr('data-url') ||
+      $('a[href*="embed"]').first().attr('href');
+
+    if (!embedUrl) {
+      logger?.warn('No embedUrl found in onclick target', { url: targetUrl });
+      return null;
+    }
+
+    return embedUrl;
+  } catch (error) {
+    logger?.error('Failed to fetch onclick target', { url: targetUrl, error: error.message });
+    return null;
+  }
 }
 
 function collectOptions(root, selector, $ctx) {
@@ -308,7 +347,7 @@ function buildEventsFromMatchesPayload(payload, timezoneName = 'UTC', logger, co
   return events;
 }
 
-function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
+async function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
   const $ = cheerio.load(html);
   const events = [];
   const seen = new Set();
@@ -340,27 +379,32 @@ function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
   let eventsFromCandidates = 0;
   let eventsFromLooseIframes = 0;
   if (matchCards.length) {
-    matchCards.each((index, cardEl) => {
-      const el = $(cardEl);
+    const matchCardArray = matchCards.toArray();
+    for (let index = 0; index < matchCardArray.length; index += 1) {
+      const el = $(matchCardArray[index]);
       const title = (el.find('.match-title').first().text() || `Event ${index + 1}`).trim();
       const category = (el.attr('data-category') || 'general').toString().trim().toLowerCase();
-      const embedUrl =
-        extractEmbedUrlFromOnclick(el.attr('onclick')) ||
-        el.find('a.match-title[href]').attr('href') ||
-        el.find('iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]').first().attr('src') ||
-        el.find('[data-src]').attr('data-src') ||
-        el.find('[data-url]').attr('data-url');
-
-      if (!embedUrl || seen.has(embedUrl)) return;
+      const onclickValue = el.attr('onclick');
 
       const sourceOptions = collectOptions(el, '#sourceSelect option, select[name*="source"] option', $);
       const qualityOptions = collectOptions(el, '#qualitySelect option, select[name*="quality"] option', $);
       const startTime = parseEventTime(el.find('.time-badge').first().text(), timezoneName);
 
+      const embedUrl =
+        el.find('a.match-title[href]').attr('href') ||
+        el.find('iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]').first().attr('src') ||
+        el.find('[data-src]').attr('data-src') ||
+        el.find('[data-url]').attr('data-url') ||
+        sourceOptions[0]?.embedUrl ||
+        qualityOptions[0]?.embedUrl ||
+        (await resolveEmbedFromOnclick(onclickValue, logger));
+
+      if (!embedUrl || seen.has(embedUrl)) continue;
+
       events.push({ title, category, embedUrl, sourceOptions, qualityOptions, startTime });
       seen.add(embedUrl);
       eventsFromMatchCards += 1;
-    });
+    }
   }
 
   const candidates = $('[data-category], .event, article, li')
@@ -485,7 +529,7 @@ async function scrapeFrontPage(frontPageUrl, timezoneName = 'UTC', logger) {
       : await fetchHtml(normalizedUrl, logger);
 
     const html = typeof rendered === 'string' ? rendered : rendered?.html;
-    let events = parseFrontPage(html, timezoneName, logger, { url: normalizedUrl });
+    let events = await parseFrontPage(html, timezoneName, logger, { url: normalizedUrl });
 
     if (!events.length && rendered && typeof rendered === 'object') {
       events = buildEventsFromMatchesPayload(rendered.pageData, timezoneName, logger, { url: normalizedUrl });

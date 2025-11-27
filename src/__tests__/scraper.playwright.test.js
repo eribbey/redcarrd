@@ -124,7 +124,7 @@ describe('scraper rendering integration', () => {
     expect(rendered).toContain('iframe id="streamPlayer"');
     expect(rendered).toContain('option value="/embed/stream1"');
 
-    const events = parseFrontPage(rendered, 'UTC');
+    const events = await parseFrontPage(rendered, 'UTC');
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       title: 'Dynamic Match',
