@@ -23,7 +23,8 @@ async function fetchHtml(url, logger) {
   return response.data;
 }
 
-async function fetchRenderedHtml(url, logger) {
+async function fetchRenderedHtml(url, logger, options = {}) {
+  const { capturePageData = false, waitForMatches = true } = options;
   const normalizedUrl = normalizeUrl(url);
   logger?.debug('Fetching rendered HTML via Playwright', { url: normalizedUrl });
 
@@ -80,8 +81,70 @@ async function fetchRenderedHtml(url, logger) {
     });
     await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('networkidle');
+
+    if (waitForMatches) {
+      try {
+        await page.waitForFunction(
+          () => {
+            const matchesRoot = document.querySelector('#matchesContent');
+            if (!matchesRoot) return false;
+            return matchesRoot.querySelectorAll('.match-title, iframe, a[href], [data-src]').length > 0;
+          },
+          { timeout: 5000 },
+        );
+      } catch (error) {
+        logger?.debug('Timed out waiting for matches content', { url: normalizedUrl, error: error.message });
+      }
+    }
+
     // Give client-side scripts enough time to hydrate dynamic content and iframes.
     await page.waitForTimeout(2000);
+
+    let pageData = null;
+    if (capturePageData) {
+      try {
+        pageData = await page.evaluate(() => {
+          const serialize = (value) => {
+            try {
+              return JSON.parse(JSON.stringify(value));
+            } catch (error) {
+              return null;
+            }
+          };
+
+          const globals = {};
+          const candidateKeys = [
+            'matches',
+            'matchData',
+            'matchesData',
+            'liveMatches',
+            'allMatches',
+            'nonLiveMatches',
+            'events',
+            '__NUXT__',
+            '__NEXT_DATA__',
+          ];
+
+          candidateKeys.forEach((key) => {
+            if (typeof window[key] !== 'undefined') {
+              globals[key] = serialize(window[key]);
+            }
+          });
+
+          let localMatches = null;
+          try {
+            const cached = localStorage.getItem('matches');
+            localMatches = cached ? JSON.parse(cached) : null;
+          } catch (error) {
+            localMatches = null;
+          }
+
+          return { globals, localMatches };
+        });
+      } catch (error) {
+        logger?.debug('Failed to capture page data', { url: normalizedUrl, error: error.message });
+      }
+    }
 
     const content = await page.content();
     const $ = cheerio.load(content || '');
@@ -113,7 +176,7 @@ async function fetchRenderedHtml(url, logger) {
     }
 
     logger?.debug('Rendered HTML fetched', { url: normalizedUrl, length: content?.length || 0 });
-    return content;
+    return capturePageData ? { html: content, pageData } : content;
   } finally {
     if (browser) {
       await browser.close();
@@ -158,6 +221,85 @@ function collectOptions(root, selector, $ctx) {
     .filter((opt) => opt.embedUrl);
 }
 
+function buildEventsFromMatchesPayload(payload, timezoneName = 'UTC', logger, context = {}) {
+  if (!payload) return [];
+
+  const events = [];
+  const seen = new Set();
+
+  const deriveEmbedUrl = (item) => {
+    if (!item || typeof item !== 'object') return null;
+    const sourceFromList = (list) => {
+      if (!Array.isArray(list)) return null;
+      const candidate = list.find((src) => src?.embedUrl || src?.url || src?.src);
+      return candidate?.embedUrl || candidate?.url || candidate?.src;
+    };
+
+    return (
+      item.embedUrl ||
+      item.embed ||
+      item.streamUrl ||
+      item.stream ||
+      item.url ||
+      item.link ||
+      item.href ||
+      sourceFromList(item.sources) ||
+      sourceFromList(item.streams)
+    );
+  };
+
+  const addFromItem = (item, index = 0) => {
+    const embedUrl = deriveEmbedUrl(item);
+    if (!embedUrl || seen.has(embedUrl)) return;
+
+    const title =
+      item?.title ||
+      item?.name ||
+      item?.match ||
+      item?.event ||
+      item?.slug ||
+      `Event ${events.length + 1}`;
+    const category = (item?.category || item?.league || item?.sport || 'general').toString().toLowerCase();
+    const startTime = parseEventTime(item?.time || item?.startTime || item?.kickoff || item?.start, timezoneName);
+    const sourceOptions = Array.isArray(item?.sourceOptions) ? item.sourceOptions : [];
+    const qualityOptions = Array.isArray(item?.qualityOptions) ? item.qualityOptions : [];
+
+    events.push({ title, category, embedUrl, sourceOptions, qualityOptions, startTime });
+    seen.add(embedUrl);
+  };
+
+  const processArray = (list = []) => {
+    if (!Array.isArray(list)) return;
+    list.forEach((item, index) => addFromItem(item, index));
+  };
+
+  const harvestArrays = (value) => {
+    if (!value) return;
+    if (Array.isArray(value)) {
+      processArray(value);
+      return;
+    }
+
+    if (typeof value === 'object') {
+      ['live', 'all', 'matches', 'events', 'nonLive', 'data', 'items'].forEach((key) => {
+        if (Array.isArray(value[key])) processArray(value[key]);
+      });
+    }
+  };
+
+  const { globals = {}, localMatches } = payload;
+  Object.values(globals || {}).forEach(harvestArrays);
+  harvestArrays(localMatches);
+
+  if (!events.length) {
+    logger?.warn('No events parsed from matches payload', { ...context, source: 'script-data' });
+  } else {
+    logger?.info('Parsed events from matches payload', { ...context, source: 'script-data', count: events.length });
+  }
+
+  return events;
+}
+
 function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
   const $ = cheerio.load(html);
   const events = [];
@@ -194,7 +336,10 @@ function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
       const category = (wrapper.attr('data-category') || 'general').trim().toLowerCase();
       const embedUrl =
         wrapper.find('iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]').first().attr('src') ||
-        el.attr('href');
+        el.attr('href') ||
+        el.data('src') ||
+        wrapper.find('[data-src]').attr('data-src') ||
+        wrapper.find('[data-url]').attr('data-url');
       if (!embedUrl || seen.has(embedUrl)) return;
 
       const sourceOptions = collectOptions(wrapper, '#sourceSelect option, select[name*="source"] option', $);
@@ -215,7 +360,10 @@ function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
   candidates.forEach((el, index) => {
     const title = (el.find('h1, h2, h3, .title, .event-title').first().text() || `Event ${index + 1}`).trim();
     const category = (el.attr('data-category') || el.find('[data-category]').attr('data-category') || 'general').trim().toLowerCase();
-    const embedUrl = el.find(iframeSelector).first().attr('src');
+    const embedUrl =
+      el.find(iframeSelector).first().attr('src') ||
+      el.find('[data-src]').attr('data-src') ||
+      el.find('[data-url]').attr('data-url');
     if (!embedUrl || seen.has(embedUrl)) return;
 
     const sourceOptions = collectOptions(el, '#sourceSelect option, select[name*="source"] option', $);
@@ -229,7 +377,7 @@ function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
 
   if (!events.length) {
     $(iframeSelector).each((index, el) => {
-      const embedUrl = $(el).attr('src');
+      const embedUrl = $(el).attr('src') || $(el).data('src') || $(el).attr('data-url');
       const title = $(el).attr('title') || `Event ${index + 1}`;
       const category = ($(el).data('category') || 'general').toString();
       if (embedUrl && !seen.has(embedUrl)) {
@@ -320,8 +468,18 @@ async function scrapeFrontPage(frontPageUrl, timezoneName = 'UTC', logger) {
   const useRenderer = process.env.SCRAPER_RENDER_WITH_JS !== 'false';
   const normalizedUrl = normalizeUrl(frontPageUrl);
   try {
-    const html = useRenderer ? await fetchRenderedHtml(normalizedUrl, logger) : await fetchHtml(normalizedUrl, logger);
-    return parseFrontPage(html, timezoneName, logger, { url: normalizedUrl });
+    const rendered = useRenderer
+      ? await fetchRenderedHtml(normalizedUrl, logger, { capturePageData: true })
+      : await fetchHtml(normalizedUrl, logger);
+
+    const html = typeof rendered === 'string' ? rendered : rendered?.html;
+    let events = parseFrontPage(html, timezoneName, logger, { url: normalizedUrl });
+
+    if (!events.length && rendered && typeof rendered === 'object') {
+      events = buildEventsFromMatchesPayload(rendered.pageData, timezoneName, logger, { url: normalizedUrl });
+    }
+
+    return events;
   } catch (error) {
     logger?.error('Failed to fetch front page', { url: normalizedUrl, timezoneName, error: error.message });
 

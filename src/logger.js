@@ -1,7 +1,9 @@
+const { EventEmitter } = require('events');
 const dayjs = require('dayjs');
 
-class Logger {
+class Logger extends EventEmitter {
   constructor(limit = 500) {
+    super();
     this.limit = limit;
     this.entries = [];
   }
@@ -19,6 +21,7 @@ class Logger {
     }
     const metaText = meta && Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : '';
     console[level === 'error' ? 'error' : 'log'](`[${entry.timestamp}] [${level.toUpperCase()}] ${message}${metaText}`);
+    this.emit('entry', entry);
     return entry;
   }
 
