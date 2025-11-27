@@ -29,15 +29,46 @@ const channelManager = new ChannelManager({
 });
 
 async function rebuildChannels() {
+  const timezone = config.timezone || defaultConfig.timezone;
+  const metaContext = { frontPageUrl: FRONT_PAGE_URL, timezone };
+
   try {
-    logger.info('Starting channel rebuild');
-    const events = await scrapeFrontPage(FRONT_PAGE_URL, config.timezone || defaultConfig.timezone, logger);
-    await channelManager.buildChannels(events, config.categories);
-    await channelManager.hydrateStreams();
+    logger.info('Starting channel rebuild', metaContext);
+
+    const events = await scrapeFrontPage(FRONT_PAGE_URL, timezone, logger);
+    const categoryCounts = events.reduce((acc, event) => {
+      const category = (event.category || 'uncategorized').toString();
+      acc[category] = (acc[category] || 0) + 1;
+      return acc;
+    }, {});
+
+    logger.info('Scraped front page events', { ...metaContext, totalEvents: events.length, categoryCounts });
+    if (!events.length) {
+      logger.warn('No events parsed from front page', metaContext);
+    }
+
+    try {
+      logger.info('Building channels from events', { ...metaContext, totalEvents: events.length });
+      await channelManager.buildChannels(events, config.categories);
+      logger.info('Channels built', { ...metaContext, channelCount: channelManager.channels.length });
+    } catch (error) {
+      logger.error('Failed to build channels', { ...metaContext, error: error.message, stack: error.stack });
+      return;
+    }
+
+    try {
+      logger.info('Hydrating channel streams', { ...metaContext, channelCount: channelManager.channels.length });
+      await channelManager.hydrateStreams();
+      logger.info('Hydrated channel streams', { ...metaContext, channelCount: channelManager.channels.length });
+    } catch (error) {
+      logger.error('Failed to hydrate streams', { ...metaContext, error: error.message, stack: error.stack });
+      return;
+    }
+
     lastRebuild = new Date().toISOString();
-    logger.info('Channel rebuild completed', { count: channelManager.channels.length });
+    logger.info('Channel rebuild completed', { ...metaContext, count: channelManager.channels.length });
   } catch (error) {
-    logger.error('Failed to rebuild channels', { error: error.message });
+    logger.error('Failed to rebuild channels', { ...metaContext, error: error.message, stack: error.stack });
   }
 }
 
