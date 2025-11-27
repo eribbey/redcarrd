@@ -25,12 +25,13 @@ const channelManager = new ChannelManager({
   lifetimeHours: config.lifetimeHours || defaultConfig.lifetimeHours,
   logger,
   frontPageUrl: FRONT_PAGE_URL,
+  timezoneName: config.timezone || defaultConfig.timezone,
 });
 
 async function rebuildChannels() {
   try {
     logger.info('Starting channel rebuild');
-    const events = await scrapeFrontPage(FRONT_PAGE_URL);
+    const events = await scrapeFrontPage(FRONT_PAGE_URL, config.timezone || defaultConfig.timezone);
     await channelManager.buildChannels(events, config.categories);
     await channelManager.hydrateStreams();
     lastRebuild = new Date().toISOString();
@@ -61,11 +62,13 @@ app.get('/api/state', (req, res) => {
 });
 
 app.post('/api/config', (req, res) => {
-  const { categories, rebuildIntervalMinutes, lifetimeHours } = req.body;
+  const { categories, rebuildIntervalMinutes, lifetimeHours, timezone } = req.body;
   config.categories = Array.isArray(categories) ? categories : config.categories;
   config.rebuildIntervalMinutes = rebuildIntervalMinutes || config.rebuildIntervalMinutes;
   config.lifetimeHours = lifetimeHours || config.lifetimeHours;
+  config.timezone = timezone || config.timezone;
   channelManager.lifetimeHours = config.lifetimeHours;
+  channelManager.timezone = config.timezone;
   saveConfig(config, logger);
   scheduleRebuild();
   res.json({ config });

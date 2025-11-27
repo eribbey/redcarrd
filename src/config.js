@@ -7,6 +7,7 @@ const defaultConfig = {
   categories: [],
   rebuildIntervalMinutes: 60,
   lifetimeHours: 24,
+  timezone: 'UTC',
 };
 
 function loadConfig(logger) {

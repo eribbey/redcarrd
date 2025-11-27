@@ -1,6 +1,11 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const dayjs = require('dayjs');
+const utc = require('dayjs/plugin/utc');
+const timezone = require('dayjs/plugin/timezone');
+
+dayjs.extend(utc);
+dayjs.extend(timezone);
 
 async function fetchHtml(url) {
   const response = await axios.get(url, {
@@ -10,10 +15,68 @@ async function fetchHtml(url) {
   return response.data;
 }
 
-function parseFrontPage(html) {
+function parseEventTime(text, timezoneName = 'UTC') {
+  const raw = text?.trim();
+  if (!raw) return null;
+  const match = raw.match(/(?<hour>\d{1,2}):(?<minute>\d{2})(?:\s*(?<ampm>AM|PM))?/i);
+  if (!match?.groups) return null;
+
+  const hour = parseInt(match.groups.hour, 10);
+  const minute = parseInt(match.groups.minute, 10);
+  if (Number.isNaN(hour) || Number.isNaN(minute)) return null;
+
+  const ampm = match.groups.ampm?.toUpperCase();
+  let adjustedHour = hour % 24;
+
+  if (ampm === 'PM' && adjustedHour < 12) adjustedHour += 12;
+  if (ampm === 'AM' && adjustedHour === 12) adjustedHour = 0;
+
+  const now = dayjs().tz(timezoneName);
+  let candidate = now.hour(adjustedHour).minute(minute).second(0).millisecond(0);
+
+  if (candidate.isBefore(now.subtract(5, 'minute'))) {
+    candidate = candidate.add(1, 'day');
+  }
+
+  return candidate.toDate();
+}
+
+function collectOptions(root, selector, $ctx) {
+  return root
+    .find(selector)
+    .toArray()
+    .map((opt) => ({
+      label: $ctx(opt).text().trim() || $ctx(opt).attr('value'),
+      embedUrl: $ctx(opt).attr('value'),
+    }))
+    .filter((opt) => opt.embedUrl);
+}
+
+function parseFrontPage(html, timezoneName = 'UTC') {
   const $ = cheerio.load(html);
   const events = [];
   const seen = new Set();
+
+  const matchesContent = $('#matchesContent');
+  if (matchesContent.length) {
+    matchesContent.find('.match-title').each((index, titleEl) => {
+      const el = $(titleEl);
+      const wrapper = el.closest('[data-category], .match, .event, li, article, .card');
+      const title = (el.text() || `Event ${index + 1}`).trim();
+      const category = (wrapper.attr('data-category') || 'general').trim().toLowerCase();
+      const embedUrl =
+        wrapper.find('iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]').first().attr('src') ||
+        el.attr('href');
+      if (!embedUrl || seen.has(embedUrl)) return;
+
+      const sourceOptions = collectOptions(wrapper, '#sourceSelect option, select[name*="source"] option', $);
+      const qualityOptions = collectOptions(wrapper, '#qualitySelect option, select[name*="quality"] option', $);
+      const startTime = parseEventTime(wrapper.find('.time-badge').first().text(), timezoneName);
+
+      events.push({ title, category, embedUrl, sourceOptions, qualityOptions, startTime });
+      seen.add(embedUrl);
+    });
+  }
 
   const candidates = $('[data-category], .event, article, li')
     .toArray()
@@ -26,25 +89,11 @@ function parseFrontPage(html) {
     const embedUrl = el.find('iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]').first().attr('src');
     if (!embedUrl || seen.has(embedUrl)) return;
 
-    const sourceOptions = el
-      .find('#sourceSelect option, select[name*="source"] option')
-      .toArray()
-      .map((opt) => ({
-        label: $(opt).text().trim() || $(opt).attr('value'),
-        embedUrl: $(opt).attr('value'),
-      }))
-      .filter((opt) => opt.embedUrl);
+    const sourceOptions = collectOptions(el, '#sourceSelect option, select[name*="source"] option', $);
+    const qualityOptions = collectOptions(el, '#qualitySelect option, select[name*="quality"] option', $);
+    const startTime = parseEventTime(el.find('.time-badge').first().text(), timezoneName);
 
-    const qualityOptions = el
-      .find('#qualitySelect option, select[name*="quality"] option')
-      .toArray()
-      .map((opt) => ({
-        label: $(opt).text().trim() || $(opt).attr('value'),
-        embedUrl: $(opt).attr('value'),
-      }))
-      .filter((opt) => opt.embedUrl);
-
-    events.push({ title, category, embedUrl, sourceOptions, qualityOptions });
+    events.push({ title, category, embedUrl, sourceOptions, qualityOptions, startTime });
     seen.add(embedUrl);
   });
 
@@ -54,7 +103,11 @@ function parseFrontPage(html) {
       const title = $(el).attr('title') || `Event ${index + 1}`;
       const category = ($(el).data('category') || 'general').toString();
       if (embedUrl && !seen.has(embedUrl)) {
-        events.push({ title, category, embedUrl, sourceOptions: [], qualityOptions: [] });
+        const startTime = parseEventTime(
+          $(el).closest('[data-category], .event, article, li').find('.time-badge').first().text(),
+          timezoneName,
+        );
+        events.push({ title, category, embedUrl, sourceOptions: [], qualityOptions: [], startTime });
         seen.add(embedUrl);
       }
     });
@@ -84,13 +137,14 @@ async function resolveStreamFromEmbed(embedUrl) {
   return parseEmbedPage(html);
 }
 
-async function scrapeFrontPage(frontPageUrl) {
+async function scrapeFrontPage(frontPageUrl, timezoneName = 'UTC') {
   const html = await fetchHtml(frontPageUrl);
-  return parseFrontPage(html);
+  return parseFrontPage(html, timezoneName);
 }
 
-function createProgrammeFromEvent(event, channelId, lifetimeHours = 24) {
-  const start = dayjs();
+function createProgrammeFromEvent(event, channelId, lifetimeHours = 24, timezoneName = 'UTC') {
+  const now = dayjs().tz(timezoneName);
+  const start = event.startTime ? dayjs(event.startTime).tz(timezoneName) : now;
   const stop = start.add(lifetimeHours, 'hour');
   return {
     channelId,
