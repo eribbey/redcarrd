@@ -27,7 +27,14 @@ async function fetchRenderedHtml(url, logger) {
   const normalizedUrl = normalizeUrl(url);
   logger?.debug('Fetching rendered HTML via Playwright', { url: normalizedUrl });
 
-  const browser = await chromium.launch({ headless: true });
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    logger?.error('Failed to launch Playwright browser', { url: normalizedUrl, error: error.message });
+    throw error;
+  }
+
   try {
     const context = await browser.newContext({
       // Use a realistic user agent to ensure the page sends full JS-driven content.
@@ -108,7 +115,9 @@ async function fetchRenderedHtml(url, logger) {
     logger?.debug('Rendered HTML fetched', { url: normalizedUrl, length: content?.length || 0 });
     return content;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close();
+    }
   }
 }
 
@@ -291,15 +300,39 @@ function parseEmbedPage(html, logger) {
 async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
   const useRenderer = options.useRenderer ?? process.env.SCRAPER_RENDER_WITH_JS !== 'false';
   const normalizedUrl = normalizeUrl(embedUrl);
-  const html = useRenderer ? await fetchRenderedHtml(normalizedUrl, logger) : await fetchHtml(normalizedUrl, logger);
-  return parseEmbedPage(html, logger);
+  try {
+    const html = useRenderer ? await fetchRenderedHtml(normalizedUrl, logger) : await fetchHtml(normalizedUrl, logger);
+    return parseEmbedPage(html, logger);
+  } catch (error) {
+    logger?.error('Failed to resolve stream from embed', { url: normalizedUrl, error: error.message });
+
+    if (useRenderer) {
+      logger?.warn('Falling back to non-rendered fetch for embed', { url: normalizedUrl });
+      const html = await fetchHtml(normalizedUrl, logger);
+      return parseEmbedPage(html, logger);
+    }
+
+    throw error;
+  }
 }
 
 async function scrapeFrontPage(frontPageUrl, timezoneName = 'UTC', logger) {
   const useRenderer = process.env.SCRAPER_RENDER_WITH_JS !== 'false';
   const normalizedUrl = normalizeUrl(frontPageUrl);
-  const html = useRenderer ? await fetchRenderedHtml(normalizedUrl, logger) : await fetchHtml(normalizedUrl, logger);
-  return parseFrontPage(html, timezoneName, logger, { url: normalizedUrl });
+  try {
+    const html = useRenderer ? await fetchRenderedHtml(normalizedUrl, logger) : await fetchHtml(normalizedUrl, logger);
+    return parseFrontPage(html, timezoneName, logger, { url: normalizedUrl });
+  } catch (error) {
+    logger?.error('Failed to fetch front page', { url: normalizedUrl, timezoneName, error: error.message });
+
+    if (useRenderer) {
+      logger?.warn('Falling back to non-rendered front page fetch', { url: normalizedUrl });
+      const html = await fetchHtml(normalizedUrl, logger);
+      return parseFrontPage(html, timezoneName, logger, { url: normalizedUrl });
+    }
+
+    throw error;
+  }
 }
 
 function createProgrammeFromEvent(event, channelId, lifetimeHours = 24, timezoneName = 'UTC') {
