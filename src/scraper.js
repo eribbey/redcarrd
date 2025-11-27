@@ -2,6 +2,7 @@ const axios = require('axios');
 const cheerio = require('cheerio');
 const dayjs = require('dayjs');
 const { chromium } = require('playwright');
+const fs = require('fs');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
 
@@ -31,12 +32,61 @@ async function fetchRenderedHtml(url, logger) {
     });
 
     const page = await context.newPage();
+    page.on('console', (message) => {
+      logger?.warn('Page console output', {
+        url: normalizedUrl,
+        type: message.type(),
+        text: message.text(),
+      });
+    });
+
+    page.on('pageerror', (error) => {
+      logger?.error('Page error during render', {
+        url: normalizedUrl,
+        message: error.message,
+        stack: error.stack,
+      });
+    });
+
+    page.on('response', async (response) => {
+      if (!response.ok()) {
+        logger?.warn('Non-OK response while rendering', {
+          url: normalizedUrl,
+          status: response.status(),
+          statusText: response.statusText(),
+          responseUrl: response.url(),
+        });
+      }
+    });
+
+    page.on('requestfailed', (request) => {
+      logger?.error('Request failed while rendering', {
+        url: normalizedUrl,
+        failure: request.failure()?.errorText,
+        responseUrl: request.url(),
+      });
+    });
     await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('networkidle');
     // Give client-side scripts enough time to hydrate dynamic content and iframes.
     await page.waitForTimeout(2000);
 
     const content = await page.content();
+    if (!content || !content.trim()) {
+      const snapshotPath = `/tmp/rendered-${Date.now()}.html`;
+      try {
+        fs.writeFileSync(snapshotPath, content || '', 'utf8');
+      } catch (error) {
+        logger?.warn('Failed to write rendered HTML snapshot', { url: normalizedUrl, error: error.message });
+      }
+
+      logger?.error('Rendered HTML is empty', {
+        url: normalizedUrl,
+        snippet: (content || '').slice(0, 500),
+        savedTo: snapshotPath,
+      });
+    }
+
     logger?.debug('Rendered HTML fetched', { url: normalizedUrl, length: content.length });
     return content;
   } finally {
