@@ -9,6 +9,11 @@ const timezone = require('dayjs/plugin/timezone');
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
+function normalizeUrl(url = '') {
+  const trimmed = url.trim();
+  return trimmed.startsWith('http') ? trimmed : `https://${trimmed.replace(/^\/\//, '')}`;
+}
+
 async function fetchHtml(url, logger) {
   const response = await axios.get(url, {
     headers: { 'User-Agent': 'redcarrd-proxy/1.0' },
@@ -19,7 +24,7 @@ async function fetchHtml(url, logger) {
 }
 
 async function fetchRenderedHtml(url, logger) {
-  const normalizedUrl = url.startsWith('http') ? url : `https://${url.replace(/^\/\//, '')}`;
+  const normalizedUrl = normalizeUrl(url);
   logger?.debug('Fetching rendered HTML via Playwright', { url: normalizedUrl });
 
   const browser = await chromium.launch({ headless: true });
@@ -72,6 +77,19 @@ async function fetchRenderedHtml(url, logger) {
     await page.waitForTimeout(2000);
 
     const content = await page.content();
+    const $ = cheerio.load(content || '');
+    const iframeSelector = 'iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]';
+    const sourceSelector = '#sourceSelect option, select[name*="source"] option';
+    const qualitySelector = '#qualitySelect option, select[name*="quality"] option';
+
+    logger?.debug('Rendered HTML selector diagnostics', {
+      url: normalizedUrl,
+      matchesContentCount: $('#matchesContent').length,
+      iframeCount: $(iframeSelector).length,
+      sourceOptionCount: $(sourceSelector).length,
+      qualityOptionCount: $(qualitySelector).length,
+    });
+
     if (!content || !content.trim()) {
       const snapshotPath = `/tmp/rendered-${Date.now()}.html`;
       try {
@@ -87,7 +105,7 @@ async function fetchRenderedHtml(url, logger) {
       });
     }
 
-    logger?.debug('Rendered HTML fetched', { url: normalizedUrl, length: content.length });
+    logger?.debug('Rendered HTML fetched', { url: normalizedUrl, length: content?.length || 0 });
     return content;
   } finally {
     await browser.close();
@@ -131,12 +149,34 @@ function collectOptions(root, selector, $ctx) {
     .filter((opt) => opt.embedUrl);
 }
 
-function parseFrontPage(html, timezoneName = 'UTC', logger) {
+function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) {
   const $ = cheerio.load(html);
   const events = [];
   const seen = new Set();
+  const normalizedUrl = context.url ? normalizeUrl(context.url) : undefined;
+  const iframeSelector = 'iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]';
+  const sourceSelector = '#sourceSelect option, select[name*="source"] option';
+  const qualitySelector = '#qualitySelect option, select[name*="quality"] option';
 
   const matchesContent = $('#matchesContent');
+  const matchesContentCount = matchesContent.length;
+  const iframeCount = $(iframeSelector).length;
+  const sourceOptionCount = $(sourceSelector).length;
+  const qualityOptionCount = $(qualitySelector).length;
+
+  logger?.info('Front page selector diagnostics', {
+    url: normalizedUrl,
+    timezone: timezoneName,
+    matchesContentFound: matchesContentCount > 0,
+    matchesContentCount,
+    iframeCount,
+    sourceOptionCount,
+    qualityOptionCount,
+  });
+
+  let eventsFromMatches = 0;
+  let eventsFromCandidates = 0;
+  let eventsFromLooseIframes = 0;
   if (matchesContent.length) {
     matchesContent.find('.match-title').each((index, titleEl) => {
       const el = $(titleEl);
@@ -154,18 +194,19 @@ function parseFrontPage(html, timezoneName = 'UTC', logger) {
 
       events.push({ title, category, embedUrl, sourceOptions, qualityOptions, startTime });
       seen.add(embedUrl);
+      eventsFromMatches += 1;
     });
   }
 
   const candidates = $('[data-category], .event, article, li')
     .toArray()
     .map((el) => $(el))
-    .filter((el) => el.find('iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]').length);
+    .filter((el) => el.find(iframeSelector).length);
 
   candidates.forEach((el, index) => {
     const title = (el.find('h1, h2, h3, .title, .event-title').first().text() || `Event ${index + 1}`).trim();
     const category = (el.attr('data-category') || el.find('[data-category]').attr('data-category') || 'general').trim().toLowerCase();
-    const embedUrl = el.find('iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]').first().attr('src');
+    const embedUrl = el.find(iframeSelector).first().attr('src');
     if (!embedUrl || seen.has(embedUrl)) return;
 
     const sourceOptions = collectOptions(el, '#sourceSelect option, select[name*="source"] option', $);
@@ -174,10 +215,11 @@ function parseFrontPage(html, timezoneName = 'UTC', logger) {
 
     events.push({ title, category, embedUrl, sourceOptions, qualityOptions, startTime });
     seen.add(embedUrl);
+    eventsFromCandidates += 1;
   });
 
   if (!events.length) {
-    $('iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]').each((index, el) => {
+    $(iframeSelector).each((index, el) => {
       const embedUrl = $(el).attr('src');
       const title = $(el).attr('title') || `Event ${index + 1}`;
       const category = ($(el).data('category') || 'general').toString();
@@ -188,11 +230,44 @@ function parseFrontPage(html, timezoneName = 'UTC', logger) {
         );
         events.push({ title, category, embedUrl, sourceOptions: [], qualityOptions: [], startTime });
         seen.add(embedUrl);
+        eventsFromLooseIframes += 1;
       }
     });
   }
 
-  logger?.debug('Parsed front page events', { count: events.length });
+  if (!events.length) {
+    const sanitized = cheerio.load(html || '');
+    sanitized('script, style').remove();
+    const snapshotPath = `/tmp/frontpage-${Date.now()}.html`;
+
+    try {
+      fs.writeFileSync(snapshotPath, sanitized.html() || '', 'utf8');
+      logger?.warn('No events parsed from front page', {
+        url: normalizedUrl,
+        timezone: timezoneName,
+        matchesContentCount,
+        iframeCount,
+        sourceOptionCount,
+        qualityOptionCount,
+        savedTo: snapshotPath,
+      });
+    } catch (error) {
+      logger?.error('Failed to persist front page snapshot', {
+        url: normalizedUrl,
+        timezone: timezoneName,
+        error: error.message,
+      });
+    }
+  }
+
+  logger?.debug('Parsed front page events', {
+    url: normalizedUrl,
+    timezone: timezoneName,
+    count: events.length,
+    eventsFromMatches,
+    eventsFromCandidates,
+    eventsFromLooseIframes,
+  });
   return events;
 }
 
@@ -215,15 +290,16 @@ function parseEmbedPage(html, logger) {
 
 async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
   const useRenderer = options.useRenderer ?? process.env.SCRAPER_RENDER_WITH_JS !== 'false';
-  const normalizedUrl = embedUrl.startsWith('http') ? embedUrl : `https://${embedUrl.replace(/^\//, '')}`;
+  const normalizedUrl = normalizeUrl(embedUrl);
   const html = useRenderer ? await fetchRenderedHtml(normalizedUrl, logger) : await fetchHtml(normalizedUrl, logger);
   return parseEmbedPage(html, logger);
 }
 
 async function scrapeFrontPage(frontPageUrl, timezoneName = 'UTC', logger) {
   const useRenderer = process.env.SCRAPER_RENDER_WITH_JS !== 'false';
-  const html = useRenderer ? await fetchRenderedHtml(frontPageUrl, logger) : await fetchHtml(frontPageUrl, logger);
-  return parseFrontPage(html, timezoneName, logger);
+  const normalizedUrl = normalizeUrl(frontPageUrl);
+  const html = useRenderer ? await fetchRenderedHtml(normalizedUrl, logger) : await fetchHtml(normalizedUrl, logger);
+  return parseFrontPage(html, timezoneName, logger, { url: normalizedUrl });
 }
 
 function createProgrammeFromEvent(event, channelId, lifetimeHours = 24, timezoneName = 'UTC') {
