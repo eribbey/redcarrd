@@ -177,6 +177,12 @@ async function rebuild() {
 
 document.getElementById('configForm').addEventListener('submit', saveConfig);
 document.getElementById('rebuildBtn').addEventListener('click', rebuild);
+document.getElementById('playlistBtn').addEventListener('click', () => {
+  window.open('/playlist.m3u8', '_blank', 'noopener');
+});
+document.getElementById('epgBtn').addEventListener('click', () => {
+  window.open('/epg.xml', '_blank', 'noopener');
+});
 
 fetchState();
 startLogStream();

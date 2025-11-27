@@ -294,6 +294,37 @@ function collectOptions(root, selector, $ctx) {
     .filter(Boolean);
 }
 
+function normalizeStreamUrl(url) {
+  const trimmed = url?.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  if (trimmed.startsWith('//')) return `https:${trimmed}`;
+  return normalizeUrl(trimmed);
+}
+
+function collectStreamCandidates($ctx, html = '') {
+  const candidates = new Set();
+
+  const add = (value) => {
+    const normalized = normalizeStreamUrl(value);
+    if (normalized) candidates.add(normalized);
+  };
+
+  $ctx('video[src], source[src], video source[src], audio[src]').each((_, el) => add($ctx(el).attr('src')));
+
+  $ctx('a[href*=".m3u8"], link[href*=".m3u8"], iframe[src*=".m3u8"], script[src*=".m3u8"]').each((_, el) =>
+    add($ctx(el).attr('src') || $ctx(el).attr('href')),
+  );
+
+  const regex = /https?:\/\/[^'"\s]+\.m3u8[^'"\s]*/gi;
+  let match;
+  while ((match = regex.exec(html))) {
+    add(match[0]);
+  }
+
+  return Array.from(candidates);
+}
+
 function buildEventsFromMatchesPayload(payload, timezoneName = 'UTC', logger, context = {}) {
   if (!payload) return [];
 
@@ -512,13 +543,25 @@ async function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) 
 
 function parseEmbedPage(html, logger) {
   const $ = cheerio.load(html);
-  const streamUrl = $('iframe#streamIframe, iframe[id*="streamIframe"]').attr('src');
+  const initialStream = $('iframe#streamIframe, iframe[id*="streamIframe"]').attr('src');
 
   const sourceOptions = collectOptions($('body'), '#sourceSelect option, select[name*="source"] option', $);
 
   const qualityOptions = collectOptions($('body'), '#qualitySelect option, select[name*="quality"] option', $);
 
-  logger?.debug('Parsed embed page', { streamUrl, sourceOptions: sourceOptions.length, qualityOptions: qualityOptions.length });
+  const directStreams = collectStreamCandidates($, html);
+  const streamUrl =
+    directStreams.find((url) => url.includes('.m3u8')) ||
+    normalizeStreamUrl(initialStream) ||
+    directStreams[0] ||
+    null;
+
+  logger?.debug('Parsed embed page', {
+    streamUrl,
+    directStreams: directStreams.length,
+    sourceOptions: sourceOptions.length,
+    qualityOptions: qualityOptions.length,
+  });
   return { streamUrl, sourceOptions, qualityOptions };
 }
 

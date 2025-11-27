@@ -136,6 +136,11 @@ button:hover {
   align-items: center;
 }
 
+.link-button {
+  min-width: 150px;
+  white-space: nowrap;
+}
+
 .logs {
   background: #0b1220;
   border: 1px solid var(--border);
