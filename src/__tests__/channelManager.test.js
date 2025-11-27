@@ -40,6 +40,7 @@ describe('ChannelManager', () => {
         stop: new Date(),
       },
     ];
+    manager.playlistReady = true;
     const playlist = manager.generatePlaylist('http://localhost:3005');
     expect(playlist).toContain('#EXTM3U');
     expect(playlist).toContain('cdn.example.com');
@@ -47,5 +48,23 @@ describe('ChannelManager', () => {
     const epg = manager.generateEpg();
     expect(epg).toContain('<tv>');
     expect(epg).toContain('football-1');
+  });
+
+  test('returns placeholder playlist when hydration not finished', () => {
+    const manager = new ChannelManager({ lifetimeHours: 24, logger });
+    manager.channels = [
+      {
+        id: 'football-1',
+        category: 'football',
+        title: 'A',
+        embedUrl: 'https://example.com/embed/a',
+        streamUrl: null,
+        sourceOptions: [],
+        qualityOptions: [],
+        expiresAt: new Date().toISOString(),
+      },
+    ];
+    const playlist = manager.generatePlaylist('http://localhost:3005');
+    expect(playlist).toContain('Playlist is still hydrating');
   });
 });

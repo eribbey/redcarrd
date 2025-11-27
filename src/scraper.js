@@ -42,7 +42,7 @@ async function fetchHtml(url, logger) {
 const BLOCKED_HOSTS = ['google.com', 'www.google.com', 'pagead2.googlesyndication.com'];
 
 async function fetchRenderedHtml(url, logger, options = {}) {
-  const { capturePageData = false, waitForMatches = true } = options;
+  const { capturePageData = false, waitForMatches = true, captureStreams = false } = options;
   const normalizedUrl = normalizeUrl(url);
   logger?.debug('Fetching rendered HTML via Playwright', { url: normalizedUrl });
 
@@ -98,6 +98,8 @@ async function fetchRenderedHtml(url, logger, options = {}) {
       });
     });
 
+    const discoveredStreams = new Set();
+
     page.on('response', async (response) => {
       if (!response.ok()) {
         logger?.warn('Non-OK response while rendering', {
@@ -106,6 +108,10 @@ async function fetchRenderedHtml(url, logger, options = {}) {
           statusText: response.statusText(),
           responseUrl: response.url(),
         });
+      }
+
+      if (captureStreams && response.url().includes('.m3u8')) {
+        discoveredStreams.add(response.url());
       }
     });
 
@@ -220,7 +226,11 @@ async function fetchRenderedHtml(url, logger, options = {}) {
     }
 
     logger?.debug('Rendered HTML fetched', { url: normalizedUrl, length: content?.length || 0 });
-    return capturePageData ? { html: content, pageData } : content;
+    if (capturePageData || captureStreams) {
+      return { html: content, pageData, discoveredStreams: Array.from(discoveredStreams) };
+    }
+
+    return content;
   } finally {
     if (browser) {
       await browser.close();
@@ -568,7 +578,8 @@ async function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) 
   return events;
 }
 
-function parseEmbedPage(html, logger) {
+function parseEmbedPage(payload, logger) {
+  const html = typeof payload === 'string' ? payload : payload?.html || '';
   const $ = cheerio.load(html);
   const initialStream = $('iframe#streamIframe, iframe[id*="streamIframe"]').attr('src');
 
@@ -576,7 +587,8 @@ function parseEmbedPage(html, logger) {
 
   const qualityOptions = collectOptions($('body'), '#qualitySelect option, select[name*="quality"] option', $);
 
-  const directStreams = collectStreamCandidates($, html);
+  const embeddedStreams = Array.isArray(payload?.discoveredStreams) ? payload.discoveredStreams : [];
+  const directStreams = Array.from(new Set([...embeddedStreams, ...collectStreamCandidates($, html)]));
   const streamUrl =
     directStreams.find((url) => url.includes('.m3u8')) ||
     normalizeStreamUrl(initialStream) ||
@@ -596,8 +608,10 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
   const useRenderer = options.useRenderer ?? process.env.SCRAPER_RENDER_WITH_JS !== 'false';
   const normalizedUrl = normalizeUrl(embedUrl);
   try {
-    const html = useRenderer ? await fetchRenderedHtml(normalizedUrl, logger) : await fetchHtml(normalizedUrl, logger);
-    return parseEmbedPage(html, logger);
+    const payload = useRenderer
+      ? await fetchRenderedHtml(normalizedUrl, logger, { captureStreams: true, waitForMatches: false })
+      : await fetchHtml(normalizedUrl, logger);
+    return parseEmbedPage(payload, logger);
   } catch (error) {
     logger?.error('Failed to resolve stream from embed', { url: normalizedUrl, error: error.message });
 

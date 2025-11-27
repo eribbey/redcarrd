@@ -91,6 +91,8 @@ app.get('/api/state', (req, res) => {
     channels: channelManager.channels,
     logs: logger.getEntries(),
     lastRebuild,
+    playlistReady: channelManager.playlistReady,
+    hydrating: channelManager.hydrationInProgress,
   });
 });
 
@@ -151,6 +153,10 @@ app.post('/api/channel/:id/quality', async (req, res) => {
 });
 
 app.get('/playlist.m3u8', (req, res) => {
+  if (!channelManager.playlistReady) {
+    return res.status(503).send('#EXTM3U\n# Playlist not ready. Streams are still being resolved.');
+  }
+
   res.set('Content-Type', 'application/x-mpegurl');
   res.send(channelManager.generatePlaylist(`${req.protocol}://${req.get('host')}`));
 });
