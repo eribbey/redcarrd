@@ -1,0 +1,10 @@
+version: '3.9'
+services:
+  redcarrd:
+    build: .
+    ports:
+      - "3005:3005"
+    environment:
+      - PORT=3005
+      - FRONT_PAGE_URL=https://ntvstream.cx
+    restart: unless-stopped

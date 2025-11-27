@@ -1,0 +1,109 @@
+const express = require('express');
+const cors = require('cors');
+const morgan = require('morgan');
+const bodyParser = require('body-parser');
+const Logger = require('./logger');
+const { loadConfig, saveConfig, defaultConfig } = require('./config');
+const ChannelManager = require('./channelManager');
+const { scrapeFrontPage } = require('./scraper');
+
+const PORT = process.env.PORT || 3005;
+const FRONT_PAGE_URL = process.env.FRONT_PAGE_URL || 'https://ntvstream.cx';
+
+const app = express();
+const logger = new Logger();
+
+app.use(cors());
+app.use(bodyParser.json());
+app.use(morgan('dev'));
+app.use(express.static(__dirname + '/public'));
+
+let config = loadConfig(logger);
+let lastRebuild = null;
+
+const channelManager = new ChannelManager({
+  lifetimeHours: config.lifetimeHours || defaultConfig.lifetimeHours,
+  logger,
+  frontPageUrl: FRONT_PAGE_URL,
+});
+
+async function rebuildChannels() {
+  try {
+    logger.info('Starting channel rebuild');
+    const events = await scrapeFrontPage(FRONT_PAGE_URL);
+    await channelManager.buildChannels(events, config.categories);
+    await channelManager.hydrateStreams();
+    lastRebuild = new Date().toISOString();
+    logger.info('Channel rebuild completed', { count: channelManager.channels.length });
+  } catch (error) {
+    logger.error('Failed to rebuild channels', { error: error.message });
+  }
+}
+
+let rebuildInterval = null;
+function scheduleRebuild() {
+  if (rebuildInterval) clearInterval(rebuildInterval);
+  const minutes = config.rebuildIntervalMinutes || defaultConfig.rebuildIntervalMinutes;
+  rebuildInterval = setInterval(rebuildChannels, minutes * 60 * 1000);
+  logger.info(`Scheduled rebuild every ${minutes} minutes`);
+}
+
+scheduleRebuild();
+rebuildChannels();
+
+app.get('/api/state', (req, res) => {
+  res.json({
+    config,
+    channels: channelManager.channels,
+    logs: logger.getEntries(),
+    lastRebuild,
+  });
+});
+
+app.post('/api/config', (req, res) => {
+  const { categories, rebuildIntervalMinutes, lifetimeHours } = req.body;
+  config.categories = Array.isArray(categories) ? categories : config.categories;
+  config.rebuildIntervalMinutes = rebuildIntervalMinutes || config.rebuildIntervalMinutes;
+  config.lifetimeHours = lifetimeHours || config.lifetimeHours;
+  channelManager.lifetimeHours = config.lifetimeHours;
+  saveConfig(config, logger);
+  scheduleRebuild();
+  res.json({ config });
+});
+
+app.post('/api/rebuild', async (req, res) => {
+  await rebuildChannels();
+  res.json({ status: 'ok', lastRebuild });
+});
+
+app.post('/api/channel/:id/source', (req, res) => {
+  const channel = channelManager.selectSource(req.params.id, req.body.embedUrl);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  res.json(channel);
+});
+
+app.post('/api/channel/:id/quality', async (req, res) => {
+  const channel = await channelManager.selectQuality(req.params.id, req.body.embedUrl);
+  if (!channel) return res.status(404).json({ error: 'Channel not found' });
+  res.json(channel);
+});
+
+app.get('/playlist.m3u8', (req, res) => {
+  res.set('Content-Type', 'application/x-mpegurl');
+  res.send(channelManager.generatePlaylist(`${req.protocol}://${req.get('host')}`));
+});
+
+app.get('/epg.xml', (req, res) => {
+  res.set('Content-Type', 'application/xml');
+  res.send(channelManager.generateEpg());
+});
+
+app.get('/api/logs', (req, res) => {
+  res.json(logger.getEntries());
+});
+
+app.listen(PORT, () => {
+  logger.info(`Server listening on port ${PORT}`);
+});
+
+module.exports = app;
