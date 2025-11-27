@@ -1,18 +1,40 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const dayjs = require('dayjs');
+const { chromium } = require('playwright');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-async function fetchHtml(url) {
+async function fetchHtml(url, logger) {
   const response = await axios.get(url, {
     headers: { 'User-Agent': 'redcarrd-proxy/1.0' },
     proxy: false,
   });
+  logger?.debug('Fetched HTML via axios', { url, length: response.data?.length || 0 });
   return response.data;
+}
+
+async function fetchRenderedHtml(url, logger) {
+  const normalizedUrl = url.startsWith('http') ? url : `https://${url.replace(/^\/\//, '')}`;
+  logger?.debug('Fetching rendered HTML via Playwright', { url: normalizedUrl });
+
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext({
+      userAgent: 'redcarrd-proxy/1.0',
+    });
+    const page = await context.newPage();
+    await page.goto(normalizedUrl, { waitUntil: 'networkidle' });
+    await page.waitForTimeout(500);
+    const content = await page.content();
+    logger?.debug('Rendered HTML fetched', { url: normalizedUrl, length: content.length });
+    return content;
+  } finally {
+    await browser.close();
+  }
 }
 
 function parseEventTime(text, timezoneName = 'UTC') {
@@ -52,7 +74,7 @@ function collectOptions(root, selector, $ctx) {
     .filter((opt) => opt.embedUrl);
 }
 
-function parseFrontPage(html, timezoneName = 'UTC') {
+function parseFrontPage(html, timezoneName = 'UTC', logger) {
   const $ = cheerio.load(html);
   const events = [];
   const seen = new Set();
@@ -113,10 +135,11 @@ function parseFrontPage(html, timezoneName = 'UTC') {
     });
   }
 
+  logger?.debug('Parsed front page events', { count: events.length });
   return events;
 }
 
-function parseEmbedPage(html) {
+function parseEmbedPage(html, logger) {
   const $ = cheerio.load(html);
   const streamUrl = $('iframe#streamIframe, iframe[id*="streamIframe"]').attr('src');
   const sourceOptions = $('#sourceSelect option, select[name*="source"] option')
@@ -129,17 +152,21 @@ function parseEmbedPage(html) {
     .map((opt) => ({ label: $(opt).text().trim() || $(opt).attr('value'), embedUrl: $(opt).attr('value') }))
     .filter((opt) => opt.embedUrl);
 
+  logger?.debug('Parsed embed page', { streamUrl, sourceOptions: sourceOptions.length, qualityOptions: qualityOptions.length });
   return { streamUrl, sourceOptions, qualityOptions };
 }
 
-async function resolveStreamFromEmbed(embedUrl) {
-  const html = await fetchHtml(embedUrl.startsWith('http') ? embedUrl : `https://${embedUrl.replace(/^\//, '')}`);
-  return parseEmbedPage(html);
+async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
+  const useRenderer = options.useRenderer ?? process.env.SCRAPER_RENDER_WITH_JS !== 'false';
+  const normalizedUrl = embedUrl.startsWith('http') ? embedUrl : `https://${embedUrl.replace(/^\//, '')}`;
+  const html = useRenderer ? await fetchRenderedHtml(normalizedUrl, logger) : await fetchHtml(normalizedUrl, logger);
+  return parseEmbedPage(html, logger);
 }
 
-async function scrapeFrontPage(frontPageUrl, timezoneName = 'UTC') {
-  const html = await fetchHtml(frontPageUrl);
-  return parseFrontPage(html, timezoneName);
+async function scrapeFrontPage(frontPageUrl, timezoneName = 'UTC', logger) {
+  const useRenderer = process.env.SCRAPER_RENDER_WITH_JS !== 'false';
+  const html = useRenderer ? await fetchRenderedHtml(frontPageUrl, logger) : await fetchHtml(frontPageUrl, logger);
+  return parseFrontPage(html, timezoneName, logger);
 }
 
 function createProgrammeFromEvent(event, channelId, lifetimeHours = 24, timezoneName = 'UTC') {

@@ -31,7 +31,7 @@ const channelManager = new ChannelManager({
 async function rebuildChannels() {
   try {
     logger.info('Starting channel rebuild');
-    const events = await scrapeFrontPage(FRONT_PAGE_URL, config.timezone || defaultConfig.timezone);
+    const events = await scrapeFrontPage(FRONT_PAGE_URL, config.timezone || defaultConfig.timezone, logger);
     await channelManager.buildChannels(events, config.categories);
     await channelManager.hydrateStreams();
     lastRebuild = new Date().toISOString();

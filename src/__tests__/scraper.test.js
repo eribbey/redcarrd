@@ -1,3 +1,5 @@
+process.env.SCRAPER_RENDER_WITH_JS = 'false';
+
 const nock = require('nock');
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');

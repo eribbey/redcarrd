@@ -65,7 +65,7 @@ class ChannelManager {
   async hydrateStreams() {
     for (const channel of this.channels) {
       try {
-        const result = await resolveStreamFromEmbed(channel.embedUrl);
+        const result = await resolveStreamFromEmbed(channel.embedUrl, this.logger);
         channel.streamUrl = result.streamUrl;
         channel.sourceOptions = result.sourceOptions?.length ? result.sourceOptions : channel.sourceOptions;
         channel.qualityOptions = result.qualityOptions?.length ? result.qualityOptions : channel.qualityOptions;
@@ -92,7 +92,7 @@ class ChannelManager {
     channel.embedUrl = embedUrl;
     channel.streamUrl = null;
     this.logger?.info(`Updated quality for ${channelId}`, { embedUrl });
-    const result = await resolveStreamFromEmbed(embedUrl);
+    const result = await resolveStreamFromEmbed(embedUrl, this.logger);
     channel.streamUrl = result.streamUrl;
     return channel;
   }
