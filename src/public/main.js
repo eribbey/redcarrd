@@ -2,6 +2,8 @@ const state = {
   channels: [],
   logs: [],
   config: {},
+  logsPaused: false,
+  pendingLogs: 0,
 };
 
 const logKeys = new Set();
@@ -92,6 +94,7 @@ function fillSelect(select, options, current) {
 }
 
 function renderLogs() {
+  if (state.logsPaused) return;
   const logs = state.logs
     .map((l) => {
       const metaText = l.meta && Object.keys(l.meta || {}).length ? ` ${JSON.stringify(l.meta)}` : '';
@@ -99,6 +102,8 @@ function renderLogs() {
     })
     .join('\n');
   document.getElementById('logs').textContent = logs;
+  state.pendingLogs = 0;
+  updateLogStatus();
 }
 
 function getLogKey(entry) {
@@ -118,6 +123,12 @@ function addLogEntry(entry, { render = true } = {}) {
     logKeys.delete(getLogKey(removed));
   }
 
+  if (state.logsPaused) {
+    state.pendingLogs += 1;
+    updateLogStatus();
+    return;
+  }
+
   if (render) renderLogs();
 }
 
@@ -127,6 +138,30 @@ function syncLogs(entries = []) {
     .reverse()
     .forEach((entry) => addLogEntry(entry, { render: false }));
   renderLogs();
+}
+
+function updateLogStatus() {
+  const statusEl = document.getElementById('logStatus');
+  const toggleBtn = document.getElementById('toggleLogs');
+  if (!statusEl || !toggleBtn) return;
+
+  if (state.logsPaused) {
+    const queued = state.pendingLogs;
+    statusEl.textContent = queued ? `Paused (${queued} new entries queued)` : 'Paused';
+    toggleBtn.textContent = 'Resume logs';
+  } else {
+    statusEl.textContent = 'Live';
+    toggleBtn.textContent = 'Pause logs';
+  }
+}
+
+function toggleLogs() {
+  state.logsPaused = !state.logsPaused;
+  if (!state.logsPaused) {
+    renderLogs();
+  } else {
+    updateLogStatus();
+  }
 }
 
 function startLogStream() {
@@ -183,7 +218,9 @@ document.getElementById('playlistBtn').addEventListener('click', () => {
 document.getElementById('epgBtn').addEventListener('click', () => {
   window.open('/epg.xml', '_blank', 'noopener');
 });
+document.getElementById('toggleLogs').addEventListener('click', toggleLogs);
 
 fetchState();
 startLogStream();
+updateLogStatus();
 setInterval(fetchState, 15000);

@@ -9,6 +9,7 @@ const { scrapeFrontPage } = require('./scraper');
 
 const PORT = process.env.PORT || 3005;
 const FRONT_PAGE_URL = process.env.FRONT_PAGE_URL || 'https://ntvstream.cx';
+const HYDRATION_CONCURRENCY = Number(process.env.HYDRATION_CONCURRENCY) || 5;
 
 const app = express();
 const logger = new Logger();
@@ -26,6 +27,7 @@ const channelManager = new ChannelManager({
   logger,
   frontPageUrl: FRONT_PAGE_URL,
   timezoneName: config.timezone || defaultConfig.timezone,
+  hydrationConcurrency: HYDRATION_CONCURRENCY,
 });
 
 async function rebuildChannels() {
