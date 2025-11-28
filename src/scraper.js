@@ -160,10 +160,31 @@ async function fetchRenderedHtml(url, logger, options = {}) {
 
     const page = await context.newPage();
     page.on('console', (message) => {
-      logger?.warn('Page console output', {
+      const type = message.type();
+      const text = message.text();
+
+      const benignConsolePatterns = [
+        /Automatic fallback to software WebGL has been deprecated/i,
+        /unsupported MIME type \('text\/html'\)/i,
+      ];
+
+      if (benignConsolePatterns.some((pattern) => pattern.test(text))) {
+        logger?.debug('Benign page console message suppressed', { url: normalizedUrl, type, text });
+        return;
+      }
+
+      const levelMap = {
+        error: 'error',
+        warning: 'info',
+        assert: 'warn',
+      };
+
+      const level = levelMap[type] || 'debug';
+
+      logger?.[level]('Page console output', {
         url: normalizedUrl,
-        type: message.type(),
-        text: message.text(),
+        type,
+        text,
       });
     });
 
