@@ -167,7 +167,10 @@ async function fetchRenderedHtml(url, logger, options = {}) {
       });
     });
 
+    let pageErrorOccurred = false;
+
     page.on('pageerror', (error) => {
+      pageErrorOccurred = true;
       const isClientWidthError = /clientWidth/i.test(error.message);
       const level = isClientWidthError ? 'debug' : 'error';
 
@@ -392,7 +395,12 @@ async function fetchRenderedHtml(url, logger, options = {}) {
 
     logger?.debug('Rendered HTML fetched', { url: normalizedUrl, length: content?.length || 0 });
     if (capturePageData || captureStreams) {
-      return { html: content, pageData, discoveredStreams: Array.from(discoveredStreams) };
+      return {
+        html: content,
+        pageData,
+        discoveredStreams: Array.from(discoveredStreams),
+        pageErrorOccurred,
+      };
     }
 
     return content;
@@ -800,7 +808,29 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
     const payload = useRenderer
       ? await fetchRenderedHtml(normalizedUrl, logger, { captureStreams: true, waitForMatches: false })
       : await fetchHtml(normalizedUrl, logger);
+
     const parsed = parseEmbedPage(payload, logger);
+
+    if (useRenderer) {
+      const discoveredStreams = Array.isArray(payload?.discoveredStreams) ? payload.discoveredStreams : [];
+      const discoveredM3u8Count = discoveredStreams.filter((url) => url.includes('.m3u8')).length;
+      const renderHadPageError = Boolean(payload?.pageErrorOccurred);
+
+      if (renderHadPageError || discoveredM3u8Count === 0) {
+        logger?.warn('Falling back to non-rendered fetch for embed after render diagnostics', {
+          url: normalizedUrl,
+          renderHadPageError,
+          discoveredStreamCount: discoveredStreams.length,
+          discoveredM3u8Count,
+          streamUrlFromRender: parsed.streamUrl,
+        });
+
+        const html = await fetchHtml(normalizedUrl, logger);
+        const fallbackParsed = parseEmbedPage(html, logger);
+        return { ...fallbackParsed, requestHeaders: buildDefaultStreamHeaders(normalizedUrl) };
+      }
+    }
+
     return { ...parsed, requestHeaders: buildDefaultStreamHeaders(normalizedUrl) };
   } catch (error) {
     logger?.error('Failed to resolve stream from embed', { url: normalizedUrl, error: error.message });
