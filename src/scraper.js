@@ -117,11 +117,16 @@ async function fetchRenderedHtml(url, logger, options = {}) {
     });
 
     page.on('pageerror', (error) => {
-      const level = /clientWidth/i.test(error.message) ? 'warn' : 'error';
+      const isClientWidthError = /clientWidth/i.test(error.message);
+      const level = isClientWidthError ? 'debug' : 'error';
+
       logger?.[level]('Page error during render', {
         url: normalizedUrl,
         message: error.message,
         stack: error.stack,
+        note: isClientWidthError
+          ? 'Upstream embed clientWidth error observed; ignoring to avoid blocking scraping.'
+          : undefined,
       });
     });
 
