@@ -51,6 +51,57 @@ async function fetchHtml(url, logger) {
 
 const BLOCKED_HOSTS = ['google.com', 'www.google.com', 'pagead2.googlesyndication.com'];
 
+const CLOUDFLARE_CHALLENGE_PATTERNS = [/cdn-cgi\/challenge/i, /__cf_chl_captcha_tk__/i];
+
+const isCloudflareChallengeUrl = (value = '') =>
+  CLOUDFLARE_CHALLENGE_PATTERNS.some((pattern) => pattern.test(value));
+
+async function isCloudflareChallengeResponse(response) {
+  if (!response) return false;
+
+  const responseUrl = response.url();
+  if (isCloudflareChallengeUrl(responseUrl)) return true;
+
+  const status = response.status();
+  if (status !== 403 && status !== 503) return false;
+
+  try {
+    const body = await response.text();
+    const lower = body?.toLowerCase?.() || '';
+    if (!lower) return false;
+
+    return /cloudflare/.test(lower) && /(attention required|just a moment|checking your browser|challenge)/.test(lower);
+  } catch (error) {
+    return false;
+  }
+}
+
+async function waitForCloudflareClearance(context, page, logger, normalizedUrl, timeoutMs = 15000) {
+  const start = Date.now();
+
+  const hasClearance = async () => {
+    try {
+      const cookies = await context.cookies();
+      return cookies.some((cookie) => cookie.name === 'cf_clearance');
+    } catch (error) {
+      logger?.debug('Failed to read cookies while waiting for Cloudflare clearance', {
+        url: normalizedUrl,
+        error: error.message,
+      });
+      return false;
+    }
+  };
+
+  if (await hasClearance()) return true;
+
+  while (Date.now() - start < timeoutMs) {
+    await page.waitForTimeout(500);
+    if (await hasClearance()) return true;
+  }
+
+  return false;
+}
+
 async function fetchRenderedHtml(url, logger, options = {}) {
   const { capturePageData = false, waitForMatches = true, captureStreams = false } = options;
   const normalizedUrl = normalizeUrl(url);
@@ -137,6 +188,14 @@ async function fetchRenderedHtml(url, logger, options = {}) {
         });
       }
 
+      if (isCloudflareChallengeUrl(response.url())) {
+        logger?.warn('Cloudflare challenge response observed while rendering', {
+          url: normalizedUrl,
+          status: response.status(),
+          responseUrl: response.url(),
+        });
+      }
+
       if (captureStreams && response.url().includes('.m3u8')) {
         discoveredStreams.add(response.url());
       }
@@ -155,7 +214,53 @@ async function fetchRenderedHtml(url, logger, options = {}) {
         mainFrame: isMainFrame,
       });
     });
-    await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
+
+    let navigationResponse;
+    try {
+      navigationResponse = await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
+    } catch (error) {
+      logger?.error('Navigation failed during render', { url: normalizedUrl, error: error.message });
+      throw error;
+    }
+
+    const challengeDetected =
+      isCloudflareChallengeUrl(page.url()) || (await isCloudflareChallengeResponse(navigationResponse));
+
+    if (challengeDetected) {
+      logger?.warn('Cloudflare challenge detected during render', {
+        url: normalizedUrl,
+        responseUrl: navigationResponse?.url?.(),
+        status: navigationResponse?.status?.(),
+      });
+
+      const setCookieHeader = navigationResponse?.headers?.()['set-cookie'] || '';
+      const headerHasClearance = /cf_clearance/i.test(setCookieHeader);
+
+      if (!headerHasClearance) {
+        logger?.info('Waiting for Cloudflare challenge to clear', { url: normalizedUrl });
+        await page.waitForTimeout(4000);
+      }
+
+      const clearanceObserved =
+        headerHasClearance || (await waitForCloudflareClearance(context, page, logger, normalizedUrl));
+
+      if (!clearanceObserved) {
+        logger?.error('Cloudflare challenge could not be bypassed', { url: normalizedUrl });
+        throw new Error(`Cloudflare challenge could not be bypassed for ${normalizedUrl}`);
+      }
+
+      logger?.info('Cloudflare challenge cleared; retrying navigation', { url: normalizedUrl });
+      navigationResponse = await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
+
+      const stillChallenged =
+        isCloudflareChallengeUrl(page.url()) || (await isCloudflareChallengeResponse(navigationResponse));
+
+      if (stillChallenged) {
+        logger?.error('Cloudflare challenge persisted after retry', { url: normalizedUrl });
+        throw new Error(`Cloudflare challenge could not be bypassed for ${normalizedUrl}`);
+      }
+    }
+
     await page.waitForLoadState('networkidle');
 
     if (waitForMatches) {
