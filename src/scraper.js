@@ -9,6 +9,12 @@ const timezone = require('dayjs/plugin/timezone');
 const DEFAULT_STREAM_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 
+const PLAYWRIGHT_LAUNCH_ARGS = [
+  '--autoplay-policy=no-user-gesture-required',
+  '--disable-features=IsolateOrigins,site-per-process,AutomationControlled',
+  '--disable-site-isolation-trials',
+];
+
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
@@ -52,7 +58,7 @@ async function fetchRenderedHtml(url, logger, options = {}) {
 
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
+    browser = await chromium.launch({ headless: true, args: PLAYWRIGHT_LAUNCH_ARGS });
   } catch (error) {
     logger?.error('Failed to launch Playwright browser', { url: normalizedUrl, error: error.message });
     throw error;
@@ -65,6 +71,22 @@ async function fetchRenderedHtml(url, logger, options = {}) {
       viewport: { width: 1366, height: 768 },
       // Some upstream hosts (e.g., custom HLS edges) use self-signed certificates; allow them during scraping.
       ignoreHTTPSErrors: true,
+      bypassCSP: true,
+      extraHTTPHeaders: {
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+
+    context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      window.chrome = window.chrome || { runtime: {} };
+      const originalQuery = window.navigator.permissions?.query;
+      if (originalQuery) {
+        window.navigator.permissions.query = (parameters) =>
+          parameters?.name === 'notifications'
+            ? Promise.resolve({ state: 'denied' })
+            : originalQuery(parameters);
+      }
     });
 
     await context.route('**/*', (route) => {
