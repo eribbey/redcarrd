@@ -70,7 +70,9 @@ function renderChannels() {
       await fetchState();
     });
 
-    previewLink.href = channel.streamUrl || channel.embedUrl;
+    previewLink.href = channel.streamUrl
+      ? `/hls/${encodeURIComponent(channel.id)}`
+      : channel.embedUrl;
     previewLink.textContent = channel.streamUrl ? 'Preview stream' : 'Open embed';
 
     container.appendChild(node);
