@@ -278,28 +278,36 @@ async function fetchRenderedHtml(url, logger, options = {}) {
             const isJavaScript = /javascript|ecmascript/i.test(contentType) || /\.js(\?|$)/i.test(responseUrl);
             const isLikelyJwPlayerBundle = isJavaScript && /jwp|jwplayer/i.test(responseUrl);
 
-            if (isLikelyJwPlayerBundle) {
+            if (isJavaScript) {
+              let body = '';
               try {
-                const body = await response.text();
-                const extractedStreams = extractHlsStreamsFromJwPlayerBundle(body);
-
-                extractedStreams.forEach((url) => {
-                  const normalized = normalizeStreamUrl(url);
-                  if (normalized) discoveredStreams.add(normalized);
-                });
-
-                if (extractedStreams.length) {
-                  logger?.info('Extracted streams from JWPlayer bundle', {
-                    url: normalizedUrl,
-                    responseUrl,
-                    count: extractedStreams.length,
-                  });
-                }
+                body = await response.text();
               } catch (error) {
-                logger?.debug('Failed to parse JWPlayer bundle response', {
+                logger?.debug('Failed to read JavaScript response body', {
                   url: normalizedUrl,
                   responseUrl,
                   error: error.message,
+                });
+              }
+
+              const probablePlayerBundle = isProbablePlayerBundleScript(responseUrl, headers, body);
+              const extractedStreams =
+                probablePlayerBundle || isLikelyJwPlayerBundle
+                  ? extractHlsStreamsFromSource(body)
+                  : [];
+
+              extractedStreams.forEach((url) => {
+                const normalized = normalizeStreamUrl(url);
+                if (normalized) discoveredStreams.add(normalized);
+              });
+
+              if (extractedStreams.length) {
+                logger?.info('Extracted streams from JavaScript response', {
+                  url: normalizedUrl,
+                  responseUrl,
+                  count: extractedStreams.length,
+                  probablePlayerBundle,
+                  jwPlayerBundle: isLikelyJwPlayerBundle,
                 });
               }
             }
@@ -676,7 +684,7 @@ function normalizeStreamUrl(url) {
   return normalizeUrl(trimmed);
 }
 
-function extractHlsStreamsFromJwPlayerBundle(source = '') {
+function extractHlsStreamsFromSource(source = '') {
   if (!source || typeof source !== 'string') return [];
 
   const candidates = new Set();
@@ -685,10 +693,21 @@ function extractHlsStreamsFromJwPlayerBundle(source = '') {
     if (!value) return;
     const cleaned = value
       .replace(/\\\//g, '/')
+      .replace(/\\u002f/gi, '/')
+      .replace(/\\x2f/gi, '/')
       .replace(/\\u0026/gi, '&')
+      .replace(/&amp;/gi, '&')
       .trim();
 
-    const normalized = normalizeStreamUrl(cleaned);
+    const decoded = (() => {
+      try {
+        return decodeURIComponent(cleaned);
+      } catch (error) {
+        return cleaned;
+      }
+    })();
+
+    const normalized = normalizeStreamUrl(decoded);
     if (normalized) candidates.add(normalized);
   };
 
@@ -706,6 +725,54 @@ function extractHlsStreamsFromJwPlayerBundle(source = '') {
   });
 
   return Array.from(candidates);
+}
+
+function extractHlsStreamsFromJwPlayerBundle(source = '') {
+  return extractHlsStreamsFromSource(source);
+}
+
+function isProbablePlayerBundleScript(responseUrl = '', headers = {}, body = '') {
+  const normalizedUrl = responseUrl?.toLowerCase?.() || '';
+  const contentType = (headers['content-type'] || headers['Content-Type'] || '').toLowerCase();
+  const disposition = (headers['content-disposition'] || headers['Content-Disposition'] || '').toLowerCase();
+  const lowerBody = body?.toLowerCase?.() || '';
+
+  const isJavaScript = /javascript|ecmascript/.test(contentType);
+  const filenameIndicators = [
+    'player',
+    'bundle',
+    'stream',
+    'hls',
+    'video',
+    'playback',
+    'embed',
+    'dash',
+    'jw',
+    'plyr',
+    'shaka',
+  ];
+
+  const urlSuggestsPlayer = filenameIndicators.some((token) => normalizedUrl.includes(token));
+  const headersSuggestPlayer = /player|stream|video/.test(disposition);
+
+  const bodyMarkers = [
+    /jwplayer/,
+    /videojs/,
+    /hls\.js/,
+    /new\s+hls\s*\(/,
+    /\.m3u8/,
+    /mpegurl/,
+    /manifest\.mpd/,
+    /dash\./,
+    /shaka\./,
+    /plyr\./,
+    /clappr/,
+    /playerConfig|playlist|sources\s*:/,
+  ];
+
+  const bodySuggestsPlayer = bodyMarkers.some((pattern) => pattern.test(lowerBody));
+
+  return isJavaScript && (urlSuggestsPlayer || headersSuggestPlayer || bodySuggestsPlayer);
 }
 
 function collectStreamCandidates($ctx, html = '') {
