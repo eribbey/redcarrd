@@ -9,6 +9,11 @@ const timezone = require('dayjs/plugin/timezone');
 const DEFAULT_STREAM_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
 
+const USER_AGENT_POOL = [
+  DEFAULT_STREAM_UA,
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+];
+
 const PLAYWRIGHT_LAUNCH_ARGS = [
   '--autoplay-policy=no-user-gesture-required',
   '--disable-features=IsolateOrigins,site-per-process,AutomationControlled',
@@ -39,9 +44,26 @@ function normalizeUrl(url = '') {
   }
 }
 
-async function fetchHtml(url, logger) {
+async function fetchHtml(url, logger, options = {}) {
+  const { cookies = [], cookieHeader, headers = {}, acceptLanguage } = options;
+
+  const mergedHeaders = {
+    'User-Agent': headers['User-Agent'] || 'redcarrd-proxy/1.0',
+    ...headers,
+  };
+
+  const cookieValue =
+    cookieHeader ||
+    cookies
+      .filter((cookie) => cookie?.name && typeof cookie.value !== 'undefined')
+      .map((cookie) => `${cookie.name}=${cookie.value}`)
+      .join('; ');
+
+  if (cookieValue) mergedHeaders.Cookie = cookieValue;
+  if (acceptLanguage) mergedHeaders['Accept-Language'] = acceptLanguage;
+
   const response = await axios.get(url, {
-    headers: { 'User-Agent': 'redcarrd-proxy/1.0' },
+    headers: mergedHeaders,
     proxy: false,
     httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
   });
@@ -102,384 +124,455 @@ async function waitForCloudflareClearance(context, page, logger, normalizedUrl, 
   return false;
 }
 
+function randomDesktopViewport() {
+  const widths = [1280, 1366, 1440, 1536, 1920];
+  const width = widths[Math.floor(Math.random() * widths.length)];
+  const height = Math.floor(width * (9 / 16) + Math.random() * 60);
+  return { width, height };
+}
+
 async function fetchRenderedHtml(url, logger, options = {}) {
   const { capturePageData = false, waitForMatches = true, captureStreams = false } = options;
   const normalizedUrl = normalizeUrl(url);
   logger?.debug('Fetching rendered HTML via Playwright', { url: normalizedUrl });
 
-  let browser;
-  try {
-    browser = await chromium.launch({ headless: true, args: PLAYWRIGHT_LAUNCH_ARGS });
-  } catch (error) {
-    logger?.error('Failed to launch Playwright browser', { url: normalizedUrl, error: error.message });
-    throw error;
-  }
+  const userAgents = Array.isArray(options.userAgents) && options.userAgents.length > 0
+    ? options.userAgents
+    : USER_AGENT_POOL;
 
-  try {
-    const context = await browser.newContext({
-      // Use a realistic user agent to ensure the page sends full JS-driven content.
-      userAgent: DEFAULT_STREAM_UA,
-      viewport: { width: 1366, height: 768 },
-      // Some upstream hosts (e.g., custom HLS edges) use self-signed certificates; allow them during scraping.
-      ignoreHTTPSErrors: true,
-      bypassCSP: true,
-      extraHTTPHeaders: {
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-    });
+  let lastError = null;
+  let lastCookies = [];
+  let lastCookieHeader = '';
+  let lastSetCookieHeaders = [];
 
-    context.addInitScript(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      window.chrome = window.chrome || { runtime: {} };
-      const originalQuery = window.navigator.permissions?.query;
-      if (originalQuery) {
-        window.navigator.permissions.query = (parameters) =>
-          parameters?.name === 'notifications'
-            ? Promise.resolve({ state: 'denied' })
-            : originalQuery(parameters);
-      }
-    });
+  for (let attempt = 0; attempt < userAgents.length; attempt += 1) {
+    const userAgent = userAgents[attempt % userAgents.length];
+    const viewport = randomDesktopViewport();
+    const acceptLanguageHeader = attempt % 2 === 0 ? 'en-US,en;q=0.9' : 'en-US,en;q=0.9,en-GB;q=0.8';
 
-    await context.route('**/*', (route) => {
-      const requestUrl = route.request().url();
-      let hostname;
-      try {
-        hostname = new URL(requestUrl).hostname;
-      } catch (error) {
-        logger?.warn('Blocking malformed request while rendering', { url: normalizedUrl, requestUrl });
-        return route.abort();
-      }
-
-      if (BLOCKED_HOSTS.some((host) => hostname === host || hostname.endsWith(`.${host}`))) {
-        logger?.debug('Blocked third-party request while rendering', { url: normalizedUrl, requestUrl });
-        return route.abort();
-      }
-
-      return route.continue();
-    });
-
-    const page = await context.newPage();
-    page.on('console', (message) => {
-      const type = message.type();
-      const text = message.text();
-
-      const benignConsolePatterns = [
-        /Automatic fallback to software WebGL has been deprecated/i,
-        /unsupported MIME type \('text\/html'\)/i,
-      ];
-
-      if (benignConsolePatterns.some((pattern) => pattern.test(text))) {
-        logger?.debug('Benign page console message suppressed', { url: normalizedUrl, type, text });
-        return;
-      }
-
-      const levelMap = {
-        error: 'error',
-        warning: 'info',
-        assert: 'warn',
-      };
-
-      const level = levelMap[type] || 'debug';
-
-      logger?.[level]('Page console output', {
-        url: normalizedUrl,
-        type,
-        text,
-      });
-    });
-
+    let browser;
+    let context;
+    const setCookieHeaders = new Set();
+    const discoveredStreams = new Set();
     let pageErrorOccurred = false;
 
-    page.on('pageerror', (error) => {
-      pageErrorOccurred = true;
-      const isClientWidthError = /clientWidth/i.test(error.message);
-      const level = isClientWidthError ? 'debug' : 'error';
+    try {
+      browser = await chromium.launch({ headless: true, args: PLAYWRIGHT_LAUNCH_ARGS });
 
-      logger?.[level]('Page error during render', {
-        url: normalizedUrl,
-        message: error.message,
-        stack: error.stack,
-        note: isClientWidthError
-          ? 'Upstream embed clientWidth error observed; ignoring to avoid blocking scraping.'
-          : undefined,
+      context = await browser.newContext({
+        userAgent,
+        viewport,
+        ignoreHTTPSErrors: true,
+        bypassCSP: true,
+        locale: 'en-US',
+        extraHTTPHeaders: {
+          'Accept-Language': acceptLanguageHeader,
+        },
       });
-    });
 
-    const discoveredStreams = new Set();
+      context.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4] });
+        window.chrome = window.chrome || { runtime: {} };
+        const originalQuery = window.navigator.permissions?.query;
+        if (originalQuery) {
+          window.navigator.permissions.query = (parameters) =>
+            parameters?.name === 'notifications'
+              ? Promise.resolve({ state: 'denied' })
+              : originalQuery(parameters);
+        }
+      });
 
-    page.on('response', async (response) => {
-      if (!response.ok()) {
-        logger?.warn('Non-OK response while rendering', {
+      await context.route('**/*', (route) => {
+        const requestUrl = route.request().url();
+        let hostname;
+        try {
+          hostname = new URL(requestUrl).hostname;
+        } catch (error) {
+          logger?.warn('Blocking malformed request while rendering', { url: normalizedUrl, requestUrl });
+          return route.abort();
+        }
+
+        if (BLOCKED_HOSTS.some((host) => hostname === host || hostname.endsWith(`.${host}`))) {
+          logger?.debug('Blocked third-party request while rendering', { url: normalizedUrl, requestUrl });
+          return route.abort();
+        }
+
+        return route.continue();
+      });
+
+      const page = await context.newPage();
+      page.on('console', (message) => {
+        const type = message.type();
+        const text = message.text();
+
+        const benignConsolePatterns = [
+          /Automatic fallback to software WebGL has been deprecated/i,
+          /unsupported MIME type \('text\/html'\)/i,
+        ];
+
+        if (benignConsolePatterns.some((pattern) => pattern.test(text))) {
+          logger?.debug('Benign page console message suppressed', { url: normalizedUrl, type, text });
+          return;
+        }
+
+        const levelMap = {
+          error: 'error',
+          warning: 'info',
+          assert: 'warn',
+        };
+
+        const level = levelMap[type] || 'debug';
+
+        logger?.[level]('Page console output', {
           url: normalizedUrl,
-          status: response.status(),
-          statusText: response.statusText(),
-          responseUrl: response.url(),
+          type,
+          text,
         });
-      }
+      });
 
-      if (isCloudflareChallengeUrl(response.url())) {
-        logger?.warn('Cloudflare challenge response observed while rendering', {
+      page.on('pageerror', (error) => {
+        pageErrorOccurred = true;
+        const isClientWidthError = /clientWidth/i.test(error.message);
+        const level = isClientWidthError ? 'debug' : 'error';
+
+        logger?.[level]('Page error during render', {
           url: normalizedUrl,
-          status: response.status(),
-          responseUrl: response.url(),
+          message: error.message,
+          stack: error.stack,
+          note: isClientWidthError
+            ? 'Upstream embed clientWidth error observed; ignoring to avoid blocking scraping.'
+            : undefined,
         });
-      }
+      });
 
-      if (captureStreams) {
-        const responseUrl = response.url();
-        if (responseUrl.includes('.m3u8')) {
-          discoveredStreams.add(responseUrl);
-        } else {
-          const headers = response.headers?.() || {};
-          const contentType = headers['content-type'] || headers['Content-Type'] || '';
-          const isJavaScript = /javascript|ecmascript/i.test(contentType) || /\.js(\?|$)/i.test(responseUrl);
-          const isLikelyJwPlayerBundle = isJavaScript && /jwp|jwplayer/i.test(responseUrl);
+      page.on('response', async (response) => {
+        if (!response.ok()) {
+          logger?.warn('Non-OK response while rendering', {
+            url: normalizedUrl,
+            status: response.status(),
+            statusText: response.statusText(),
+            responseUrl: response.url(),
+          });
+        }
 
-          if (isLikelyJwPlayerBundle) {
-            try {
-              const body = await response.text();
-              const extractedStreams = extractHlsStreamsFromJwPlayerBundle(body);
+        const header = response.headers?.()['set-cookie'];
+        if (header) setCookieHeaders.add(header);
 
-              extractedStreams.forEach((url) => {
-                const normalized = normalizeStreamUrl(url);
-                if (normalized) discoveredStreams.add(normalized);
-              });
+        if (isCloudflareChallengeUrl(response.url())) {
+          logger?.warn('Cloudflare challenge response observed while rendering', {
+            url: normalizedUrl,
+            status: response.status(),
+            responseUrl: response.url(),
+          });
+        }
 
-              if (extractedStreams.length) {
-                logger?.info('Extracted streams from JWPlayer bundle', {
+        if (captureStreams) {
+          const responseUrl = response.url();
+          if (responseUrl.includes('.m3u8')) {
+            discoveredStreams.add(responseUrl);
+          } else {
+            const headers = response.headers?.() || {};
+            const contentType = headers['content-type'] || headers['Content-Type'] || '';
+            const isJavaScript = /javascript|ecmascript/i.test(contentType) || /\.js(\?|$)/i.test(responseUrl);
+            const isLikelyJwPlayerBundle = isJavaScript && /jwp|jwplayer/i.test(responseUrl);
+
+            if (isLikelyJwPlayerBundle) {
+              try {
+                const body = await response.text();
+                const extractedStreams = extractHlsStreamsFromJwPlayerBundle(body);
+
+                extractedStreams.forEach((url) => {
+                  const normalized = normalizeStreamUrl(url);
+                  if (normalized) discoveredStreams.add(normalized);
+                });
+
+                if (extractedStreams.length) {
+                  logger?.info('Extracted streams from JWPlayer bundle', {
+                    url: normalizedUrl,
+                    responseUrl,
+                    count: extractedStreams.length,
+                  });
+                }
+              } catch (error) {
+                logger?.debug('Failed to parse JWPlayer bundle response', {
                   url: normalizedUrl,
                   responseUrl,
-                  count: extractedStreams.length,
+                  error: error.message,
                 });
               }
-            } catch (error) {
-              logger?.debug('Failed to parse JWPlayer bundle response', {
-                url: normalizedUrl,
-                responseUrl,
-                error: error.message,
-              });
             }
           }
         }
-      }
-    });
-
-    page.on('requestfailed', (request) => {
-      const failure = request.failure()?.errorText;
-      const responseUrl = request.url();
-      const isMainFrame = request.frame() === page.mainFrame();
-      const level = isMainFrame ? 'error' : 'warn';
-
-      logger?.[level]('Request failed while rendering', {
-        url: normalizedUrl,
-        failure,
-        responseUrl,
-        mainFrame: isMainFrame,
-      });
-    });
-
-    let navigationResponse;
-    try {
-      navigationResponse = await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
-    } catch (error) {
-      logger?.error('Navigation failed during render', { url: normalizedUrl, error: error.message });
-      throw error;
-    }
-
-    const challengeDetected =
-      isCloudflareChallengeUrl(page.url()) || (await isCloudflareChallengeResponse(navigationResponse));
-
-    if (challengeDetected) {
-      logger?.warn('Cloudflare challenge detected during render', {
-        url: normalizedUrl,
-        responseUrl: navigationResponse?.url?.(),
-        status: navigationResponse?.status?.(),
       });
 
-      const setCookieHeader = navigationResponse?.headers?.()['set-cookie'] || '';
-      const headerHasClearance = /cf_clearance/i.test(setCookieHeader);
+      page.on('requestfailed', (request) => {
+        const failure = request.failure()?.errorText;
+        const responseUrl = request.url();
+        const isMainFrame = request.frame() === page.mainFrame();
+        const level = isMainFrame ? 'error' : 'warn';
 
-      if (!headerHasClearance) {
-        logger?.info('Waiting for Cloudflare challenge to clear', { url: normalizedUrl });
-        await page.waitForTimeout(4000);
+        logger?.[level]('Request failed while rendering', {
+          url: normalizedUrl,
+          failure,
+          responseUrl,
+          mainFrame: isMainFrame,
+        });
+      });
+
+      let navigationResponse;
+      try {
+        navigationResponse = await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
+      } catch (error) {
+        logger?.error('Navigation failed during render', { url: normalizedUrl, error: error.message, userAgent });
+        throw error;
       }
 
-      const clearanceObserved =
-        headerHasClearance || (await waitForCloudflareClearance(context, page, logger, normalizedUrl));
-
-      if (!clearanceObserved) {
-        logger?.error('Cloudflare challenge could not be bypassed', { url: normalizedUrl });
-        throw new Error(`Cloudflare challenge could not be bypassed for ${normalizedUrl}`);
-      }
-
-      logger?.info('Cloudflare challenge cleared; retrying navigation', { url: normalizedUrl });
-      navigationResponse = await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
-
-      const stillChallenged =
+      const challengeDetected =
         isCloudflareChallengeUrl(page.url()) || (await isCloudflareChallengeResponse(navigationResponse));
 
-      if (stillChallenged) {
-        logger?.error('Cloudflare challenge persisted after retry', { url: normalizedUrl });
-        throw new Error(`Cloudflare challenge could not be bypassed for ${normalizedUrl}`);
-      }
-    }
-
-    try {
-      await page.waitForLoadState('networkidle', { timeout: 15000 });
-    } catch (error) {
-      logger?.debug('Timed out waiting for network idle during render; proceeding anyway', {
-        url: normalizedUrl,
-        error: error.message,
-      });
-
-      try {
-        await page.waitForLoadState('load', { timeout: 5000 });
-      } catch (secondaryError) {
-        logger?.warn('Page load state check failed; continuing with available DOM', {
+      if (challengeDetected) {
+        logger?.warn('Cloudflare challenge detected during render', {
           url: normalizedUrl,
-          error: secondaryError.message,
+          responseUrl: navigationResponse?.url?.(),
+          status: navigationResponse?.status?.(),
         });
-      }
-    }
 
-    if (waitForMatches) {
+        const setCookieHeader = navigationResponse?.headers?.()['set-cookie'] || '';
+        if (setCookieHeader) setCookieHeaders.add(setCookieHeader);
+        const headerHasClearance = /cf_clearance/i.test(setCookieHeader);
+
+        if (!headerHasClearance) {
+          logger?.info('Waiting for Cloudflare challenge to clear', { url: normalizedUrl });
+          await page.waitForTimeout(4000);
+        }
+
+        const clearanceObserved =
+          headerHasClearance || (await waitForCloudflareClearance(context, page, logger, normalizedUrl));
+
+        if (!clearanceObserved) {
+          logger?.error('Cloudflare challenge could not be bypassed', { url: normalizedUrl });
+          throw new Error(`Cloudflare challenge could not be bypassed for ${normalizedUrl}`);
+        }
+
+        logger?.info('Cloudflare challenge cleared; retrying navigation', { url: normalizedUrl });
+        navigationResponse = await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
+
+        const stillChallenged =
+          isCloudflareChallengeUrl(page.url()) || (await isCloudflareChallengeResponse(navigationResponse));
+
+        if (stillChallenged) {
+          logger?.error('Cloudflare challenge persisted after retry', { url: normalizedUrl });
+          throw new Error(`Cloudflare challenge could not be bypassed for ${normalizedUrl}`);
+        }
+
+        const retrySetCookie = navigationResponse?.headers?.()['set-cookie'];
+        if (retrySetCookie) setCookieHeaders.add(retrySetCookie);
+      }
+
       try {
-        await page.waitForFunction(
-          () => {
-            const matchesRoot = document.querySelector('#matchesContent');
-            if (!matchesRoot) return false;
-            return matchesRoot.querySelectorAll('.match-title, iframe, a[href], [data-src]').length > 0;
-          },
-          { timeout: 5000 },
-        );
+        await page.waitForLoadState('networkidle', { timeout: 15000 });
       } catch (error) {
-        logger?.debug('Timed out waiting for matches content', { url: normalizedUrl, error: error.message });
+        logger?.debug('Timed out waiting for network idle during render; proceeding anyway', {
+          url: normalizedUrl,
+          error: error.message,
+        });
+
+        try {
+          await page.waitForLoadState('load', { timeout: 5000 });
+        } catch (secondaryError) {
+          logger?.warn('Page load state check failed; continuing with available DOM', {
+            url: normalizedUrl,
+            error: secondaryError.message,
+          });
+        }
       }
-    }
 
-    // Give client-side scripts enough time to hydrate dynamic content and iframes.
-    await page.waitForTimeout(2000);
-
-    if (captureStreams) {
-      try {
-        await page.evaluate(() => {
-          const video = document.querySelector('video');
-          if (video) {
-            video.muted = true;
-            video.play?.();
-          }
-
-          const playButtons = Array.from(
-            document.querySelectorAll('.vjs-big-play-button, .plyr__control, button[type="button"], button'),
+      if (waitForMatches) {
+        try {
+          await page.waitForFunction(
+            () => {
+              const matchesRoot = document.querySelector('#matchesContent');
+              if (!matchesRoot) return false;
+              return matchesRoot.querySelectorAll('.match-title, iframe, a[href], [data-src]').length > 0;
+            },
+            { timeout: 5000 },
           );
-          playButtons.slice(0, 2).forEach((button) => {
-            try {
-              button.click();
-            } catch (error) {
-              // Ignore click failures silently to keep scraping resilient.
-            }
-          });
-        });
-
-        // Allow time for the player to request manifests/segments after the play attempt.
-        await page.waitForTimeout(1500);
-      } catch (error) {
-        logger?.debug('Failed to trigger playback during render', { url: normalizedUrl, error: error.message });
+        } catch (error) {
+          logger?.debug('Timed out waiting for matches content', { url: normalizedUrl, error: error.message });
+        }
       }
-    }
 
-    let pageData = null;
-    if (capturePageData) {
-      try {
-        pageData = await page.evaluate(() => {
-          const serialize = (value) => {
-            try {
-              return JSON.parse(JSON.stringify(value));
-            } catch (error) {
-              return null;
+      // Give client-side scripts enough time to hydrate dynamic content and iframes.
+      await page.waitForTimeout(2000);
+
+      if (captureStreams) {
+        try {
+          await page.evaluate(() => {
+            const video = document.querySelector('video');
+            if (video) {
+              video.muted = true;
+              video.play?.();
             }
-          };
 
-          const globals = {};
-          const candidateKeys = [
-            'matches',
-            'matchData',
-            'matchesData',
-            'liveMatches',
-            'allMatches',
-            'nonLiveMatches',
-            'events',
-            '__NUXT__',
-            '__NEXT_DATA__',
-          ];
-
-          candidateKeys.forEach((key) => {
-            if (typeof window[key] !== 'undefined') {
-              globals[key] = serialize(window[key]);
-            }
+            const playButtons = Array.from(
+              document.querySelectorAll('.vjs-big-play-button, .plyr__control, button[type="button"], button'),
+            );
+            playButtons.slice(0, 2).forEach((button) => {
+              try {
+                button.click();
+              } catch (error) {
+                // Ignore click failures silently to keep scraping resilient.
+              }
+            });
           });
 
-          let localMatches = null;
-          try {
-            const cached = localStorage.getItem('matches');
-            localMatches = cached ? JSON.parse(cached) : null;
-          } catch (error) {
-            localMatches = null;
-          }
-
-          return { globals, localMatches };
-        });
-      } catch (error) {
-        logger?.debug('Failed to capture page data', { url: normalizedUrl, error: error.message });
-      }
-    }
-
-    const content = await page.content();
-    const $ = cheerio.load(content || '');
-    const iframeSelector = 'iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]';
-    const sourceSelector = '#sourceSelect option, select[name*="source"] option';
-    const qualitySelector = '#qualitySelect option, select[name*="quality"] option';
-
-    logger?.debug('Rendered HTML selector diagnostics', {
-      url: normalizedUrl,
-      matchCardCount: $('.match-card').length,
-      matchesContentCount: $('#matchesContent').length,
-      iframeCount: $(iframeSelector).length,
-      sourceOptionCount: $(sourceSelector).length,
-      qualityOptionCount: $(qualitySelector).length,
-    });
-
-    if (!content || !content.trim()) {
-      const snapshotPath = `/tmp/rendered-${Date.now()}.html`;
-      try {
-        fs.writeFileSync(snapshotPath, content || '', 'utf8');
-      } catch (error) {
-        logger?.warn('Failed to write rendered HTML snapshot', { url: normalizedUrl, error: error.message });
+          // Allow time for the player to request manifests/segments after the play attempt.
+          await page.waitForTimeout(1500);
+        } catch (error) {
+          logger?.debug('Failed to trigger playback during render', { url: normalizedUrl, error: error.message });
+        }
       }
 
-      logger?.error('Rendered HTML is empty', {
+      let pageData = null;
+      if (capturePageData) {
+        try {
+          pageData = await page.evaluate(() => {
+            const serialize = (value) => {
+              try {
+                return JSON.parse(JSON.stringify(value));
+              } catch (error) {
+                return null;
+              }
+            };
+
+            const globals = {};
+            const candidateKeys = [
+              'matches',
+              'matchData',
+              'matchesData',
+              'liveMatches',
+              'allMatches',
+              'nonLiveMatches',
+              'events',
+              '__NUXT__',
+              '__NEXT_DATA__',
+            ];
+
+            candidateKeys.forEach((key) => {
+              if (typeof window[key] !== 'undefined') {
+                globals[key] = serialize(window[key]);
+              }
+            });
+
+            let localMatches = null;
+            try {
+              const cached = localStorage.getItem('matches');
+              localMatches = cached ? JSON.parse(cached) : null;
+            } catch (error) {
+              localMatches = null;
+            }
+
+            return { globals, localMatches };
+          });
+        } catch (error) {
+          logger?.debug('Failed to capture page data', { url: normalizedUrl, error: error.message });
+        }
+      }
+
+      const content = await page.content();
+      const $ = cheerio.load(content || '');
+      const iframeSelector = 'iframe#streamPlayer, iframe[id*="streamPlayer"], iframe[src*="embed"]';
+      const sourceSelector = '#sourceSelect option, select[name*="source"] option';
+      const qualitySelector = '#qualitySelect option, select[name*="quality"] option';
+
+      logger?.debug('Rendered HTML selector diagnostics', {
         url: normalizedUrl,
-        snippet: (content || '').slice(0, 500),
-        savedTo: snapshotPath,
+        matchCardCount: $('.match-card').length,
+        matchesContentCount: $('#matchesContent').length,
+        iframeCount: $(iframeSelector).length,
+        sourceOptionCount: $(sourceSelector).length,
+        qualityOptionCount: $(qualitySelector).length,
       });
-    }
 
-    logger?.debug('Rendered HTML fetched', { url: normalizedUrl, length: content?.length || 0 });
-    if (capturePageData || captureStreams) {
-      return {
-        html: content,
-        pageData,
-        discoveredStreams: Array.from(discoveredStreams),
-        pageErrorOccurred,
-      };
-    }
+      if (!content || !content.trim()) {
+        const snapshotPath = `/tmp/rendered-${Date.now()}.html`;
+        try {
+          fs.writeFileSync(snapshotPath, content || '', 'utf8');
+        } catch (error) {
+          logger?.warn('Failed to write rendered HTML snapshot', { url: normalizedUrl, error: error.message });
+        }
 
-    return content;
-  } finally {
-    if (browser) {
-      await browser.close();
+        logger?.error('Rendered HTML is empty', {
+          url: normalizedUrl,
+          snippet: (content || '').slice(0, 500),
+          savedTo: snapshotPath,
+        });
+      }
+
+      const contextCookies = await context.cookies();
+      lastCookies = contextCookies;
+      lastCookieHeader = contextCookies
+        .filter((cookie) => cookie?.name && typeof cookie.value !== 'undefined')
+        .map((cookie) => `${cookie.name}=${cookie.value}`)
+        .join('; ');
+      lastSetCookieHeaders = Array.from(setCookieHeaders);
+
+      logger?.debug('Rendered HTML fetched', { url: normalizedUrl, length: content?.length || 0, userAgent });
+      if (capturePageData || captureStreams) {
+        return {
+          html: content,
+          pageData,
+          discoveredStreams: Array.from(discoveredStreams),
+          pageErrorOccurred,
+          cookies: contextCookies,
+          cookieHeader: lastCookieHeader,
+          setCookieHeaders: Array.from(setCookieHeaders),
+        };
+      }
+
+      return content;
+    } catch (error) {
+      lastError = error;
+      logger?.warn('Render attempt failed; evaluating retry strategy', {
+        url: normalizedUrl,
+        userAgent,
+        error: error.message,
+        attempt: attempt + 1,
+        totalAttempts: userAgents.length,
+      });
+    } finally {
+      lastSetCookieHeaders = Array.from(setCookieHeaders);
+
+      if (context) {
+        try {
+          const contextCookies = await context.cookies();
+          lastCookies = contextCookies;
+          lastCookieHeader = contextCookies
+            .filter((cookie) => cookie?.name && typeof cookie.value !== 'undefined')
+            .map((cookie) => `${cookie.name}=${cookie.value}`)
+            .join('; ');
+        } catch (cookieError) {
+          logger?.debug('Failed to read cookies after render attempt', {
+            url: normalizedUrl,
+            error: cookieError.message,
+          });
+        }
+      }
+
+      if (browser) {
+        await browser.close();
+      }
     }
   }
+
+  const enrichedError =
+    lastError || new Error(`Rendering failed for ${normalizeUrl(url)} after rotating user agents`);
+  enrichedError.cookies = lastCookies;
+  enrichedError.cookieHeader = lastCookieHeader;
+  enrichedError.setCookieHeaders = lastSetCookieHeaders;
+  throw enrichedError;
 }
 
 function parseEventTime(text, timezoneName = 'UTC') {
@@ -932,7 +1025,11 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
           streamUrlFromRender: parsed.streamUrl,
         });
 
-        const html = await fetchHtml(normalizedUrl, logger);
+        const html = await fetchHtml(normalizedUrl, logger, {
+          cookies: payload?.cookies,
+          cookieHeader: payload?.cookieHeader,
+          acceptLanguage: 'en-US,en;q=0.9',
+        });
         const fallbackParsed = parseEmbedPage(html, logger);
         return { ...fallbackParsed, requestHeaders: buildDefaultStreamHeaders(normalizedUrl) };
       }
@@ -944,7 +1041,11 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
 
     if (useRenderer) {
       logger?.warn('Falling back to non-rendered fetch for embed', { url: normalizedUrl });
-      const html = await fetchHtml(normalizedUrl, logger);
+      const html = await fetchHtml(normalizedUrl, logger, {
+        cookies: error?.cookies,
+        cookieHeader: error?.cookieHeader,
+        acceptLanguage: 'en-US,en;q=0.9',
+      });
       const parsed = parseEmbedPage(html, logger);
       return { ...parsed, requestHeaders: buildDefaultStreamHeaders(normalizedUrl) };
     }
@@ -974,7 +1075,11 @@ async function scrapeFrontPage(frontPageUrl, timezoneName = 'UTC', logger) {
 
     if (useRenderer) {
       logger?.warn('Falling back to non-rendered front page fetch', { url: normalizedUrl });
-      const html = await fetchHtml(normalizedUrl, logger);
+      const html = await fetchHtml(normalizedUrl, logger, {
+        cookies: error?.cookies,
+        cookieHeader: error?.cookieHeader,
+        acceptLanguage: 'en-US,en;q=0.9',
+      });
       return parseFrontPage(html, timezoneName, logger, { url: normalizedUrl });
     }
 
