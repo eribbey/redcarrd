@@ -27,6 +27,11 @@ describe('scraper playwright end-to-end', () => {
             title.textContent = 'Playwright Fixture Match';
             match.appendChild(title);
 
+            const liveBadge = document.createElement('span');
+            liveBadge.className = 'live-badge';
+            liveBadge.textContent = 'Live';
+            match.appendChild(liveBadge);
+
             const time = document.createElement('span');
             time.className = 'time-badge';
             time.textContent = '10:00 AM';

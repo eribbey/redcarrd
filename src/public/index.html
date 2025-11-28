@@ -81,11 +81,15 @@
           </label>
         </div>
         <div class="preview">
-          <a class="preview-link" href="#" target="_blank">Preview stream</a>
+          <video class="preview-player" controls muted playsinline></video>
+          <div class="preview-actions">
+            <button class="preview-link secondary link-button" type="button">Preview stream</button>
+          </div>
         </div>
       </div>
     </template>
 
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
     <script src="/main.js"></script>
   </body>
 </html>

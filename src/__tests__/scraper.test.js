@@ -12,6 +12,7 @@ dayjs.extend(timezone);
 const frontPageHtml = `
 <div class="match-card" data-category="football" onclick="openMatch('https://ntvstream.cx/embed?a')">
   <div class="match-title">Match A</div>
+  <span class="live-badge">Live</span>
   <select id="sourceSelect">
     <option value="https://ntvstream.cx/embed?a">Source A</option>
     <option value="https://ntvstream.cx/embed?b">Source B</option>
@@ -23,6 +24,7 @@ const frontPageHtml = `
 </div>
 <div class="match-card" data-category="basketball" onclick="openMatch('https://ntvstream.cx/embed?c')">
   <div class="match-title">Match B</div>
+  <span class="live-badge">Live</span>
   <span class="time-badge">10:00</span>
 </div>
 `;
@@ -44,6 +46,7 @@ const matchesContentHtml = `
 <div id="matchesContent">
   <div class="match-card" data-category="football" onclick="watchMatch('https://ntvstream.cx/embed?d')">
     <div class="match-title">Team A vs Team B</div>
+    <span class="live-badge">Live</span>
     <span class="time-badge">13:30</span>
     <select id="sourceSelect">
       <option value="https://ntvstream.cx/embed?d">Main</option>
@@ -106,6 +109,7 @@ describe('scraper helpers', () => {
     const onclickOnlyHtml = `
     <div class="match-card" data-category="football" onclick="openMatch('/embedded/xyz')">
       <div class="match-title">Onclick Only</div>
+      <span class="live-badge">Live</span>
     </div>`;
 
     nock('https://ntvstream.cx').get('/embedded/xyz').reply(

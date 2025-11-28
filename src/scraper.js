@@ -502,6 +502,7 @@ async function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) 
   const matchesContentCount = matchesContent.length;
   const matchCards = $('.match-card');
   const matchCardCount = matchCards.length;
+  const liveMatchCards = $('.match-card .live-badge').length;
   const iframeCount = $(iframeSelector).length;
   const sourceOptionCount = $(sourceSelector).length;
   const qualityOptionCount = $(qualitySelector).length;
@@ -512,18 +513,25 @@ async function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) 
     matchesContentFound: matchesContentCount > 0,
     matchesContentCount,
     matchCardCount,
+    liveMatchCards,
     iframeCount,
     sourceOptionCount,
     qualityOptionCount,
   });
 
   let eventsFromMatchCards = 0;
+  let nonLiveSkipped = 0;
   let eventsFromCandidates = 0;
   let eventsFromLooseIframes = 0;
   if (matchCards.length) {
     const matchCardArray = matchCards.toArray();
     for (let index = 0; index < matchCardArray.length; index += 1) {
       const el = $(matchCardArray[index]);
+      const isLive = el.find('span.live-badge').length > 0;
+      if (!isLive) {
+        nonLiveSkipped += 1;
+        continue;
+      }
       const title = (el.find('.match-title').first().text() || `Event ${index + 1}`).trim();
       const category = (el.attr('data-category') || 'general').toString().trim().toLowerCase();
       const onclickValue = el.attr('onclick');
@@ -620,6 +628,7 @@ async function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) 
     timezone: timezoneName,
     count: events.length,
     eventsFromMatchCards,
+    nonLiveSkipped,
     eventsFromCandidates,
     eventsFromLooseIframes,
   });

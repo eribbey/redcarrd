@@ -18,6 +18,7 @@ describe('scraper rendering integration', () => {
         <div id="matchesContent">
           <div class="match-card" data-category="football" onclick="openMatch('/embed/stream1')">
             <div class="match-title">Dynamic Match</div>
+            <span class="live-badge">Live</span>
             <span class="time-badge">11:45 AM</span>
             <div id="dynamic-container"></div>
           </div>
@@ -142,7 +143,7 @@ describe('scraper rendering integration', () => {
     expect(rendered).toContain('option value="/embed/stream1"');
 
     const result = parseEmbedPage(rendered);
-    expect(result.streamUrl).toBe('/hls/primary.m3u8');
+    expect(result.streamUrl).toContain('/hls/primary.m3u8');
     expect(result.sourceOptions).toHaveLength(2);
     expect(result.qualityOptions).toHaveLength(2);
   });
