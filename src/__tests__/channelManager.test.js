@@ -1,10 +1,13 @@
+jest.mock('axios');
+const axios = require('axios');
 const ChannelManager = require('../channelManager');
 
 describe('ChannelManager', () => {
-  const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
+  const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
 
   beforeEach(() => {
     jest.clearAllMocks();
+    axios.get.mockReset();
   });
 
   test('builds deterministic channels and reconciles updates', async () => {
@@ -112,5 +115,36 @@ describe('ChannelManager', () => {
     ];
     const playlist = manager.generatePlaylist('http://localhost:3005');
     expect(playlist).toContain('Playlist is still hydrating');
+  });
+
+  test('retains upstream cookies across proxied HLS requests', async () => {
+    const manager = new ChannelManager({ lifetimeHours: 24, logger });
+    const channel = {
+      id: 'ch-football',
+      category: 'football',
+      title: 'A',
+      embedUrl: 'https://example.com/embed/a',
+      streamUrl: 'https://cdn.example.com/a.m3u8',
+      requestHeaders: { Referer: 'https://example.com/embed/a' },
+      sourceOptions: [],
+      qualityOptions: [],
+      expiresAt: new Date().toISOString(),
+    };
+
+    axios.get.mockResolvedValueOnce({
+      data: 'manifest',
+      headers: { 'set-cookie': ['sid=abc123; Path=/', 'region=us; Max-Age=3600'] },
+    });
+
+    await manager.fetchStream(channel, channel.streamUrl);
+    expect(channel.cookies).toEqual(expect.arrayContaining(['sid=abc123', 'region=us']));
+
+    axios.get.mockResolvedValueOnce({ data: 'segment-bytes', headers: {} });
+
+    await manager.fetchStream(channel, 'https://cdn.example.com/segment1.ts');
+    expect(axios.get).toHaveBeenLastCalledWith(
+      'https://cdn.example.com/segment1.ts',
+      expect.objectContaining({ headers: expect.objectContaining({ Cookie: 'sid=abc123; region=us' }) }),
+    );
   });
 });
