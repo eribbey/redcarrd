@@ -37,6 +37,7 @@ async function fetchHtml(url, logger) {
   const response = await axios.get(url, {
     headers: { 'User-Agent': 'redcarrd-proxy/1.0' },
     proxy: false,
+    httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
   });
   logger?.debug('Fetched HTML via axios', { url, length: response.data?.length || 0 });
   return response.data;
@@ -62,6 +63,8 @@ async function fetchRenderedHtml(url, logger, options = {}) {
       // Use a realistic user agent to ensure the page sends full JS-driven content.
       userAgent: DEFAULT_STREAM_UA,
       viewport: { width: 1366, height: 768 },
+      // Some upstream hosts (e.g., custom HLS edges) use self-signed certificates; allow them during scraping.
+      ignoreHTTPSErrors: true,
     });
 
     await context.route('**/*', (route) => {

@@ -4,6 +4,7 @@ const timezone = require('dayjs/plugin/timezone');
 const { create } = require('xmlbuilder');
 const axios = require('axios');
 const crypto = require('crypto');
+const https = require('https');
 const { resolveStreamFromEmbed, createProgrammeFromEvent, buildDefaultStreamHeaders } = require('./scraper');
 
 dayjs.extend(utc);
@@ -289,6 +290,8 @@ class ChannelManager {
       headers,
       responseType: 'arraybuffer',
       validateStatus: (status) => status >= 200 && status < 500,
+      // Some HLS origins provide certificates that aren't signed by public CAs.
+      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
     });
 
     this.updateCookies(channel, response.headers['set-cookie']);
