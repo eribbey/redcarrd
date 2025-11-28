@@ -4,7 +4,13 @@ const nock = require('nock');
 const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
-const { parseFrontPage, parseEmbedPage, resolveStreamFromEmbed, createProgrammeFromEvent } = require('../scraper');
+const {
+  parseFrontPage,
+  parseEmbedPage,
+  resolveStreamFromEmbed,
+  createProgrammeFromEvent,
+  extractHlsStreamsFromJwPlayerBundle,
+} = require('../scraper');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -150,5 +156,15 @@ describe('scraper helpers', () => {
     expect(start.hour()).toBe(9);
     expect(start.minute()).toBe(15);
     expect(stop.diff(start, 'hour')).toBe(2);
+  });
+
+  test('extracts HLS streams from JWPlayer bundles', () => {
+    const bundle = `!function(){jwplayer("v").setup({file:"https:\\/\\/cdn.example.com\\/live\\/alpha.m3u8",sources:[{file:'/beta/stream.m3u8'}]})}();`;
+    const streams = extractHlsStreamsFromJwPlayerBundle(bundle);
+
+    expect(streams).toEqual([
+      'https://cdn.example.com/live/alpha.m3u8',
+      'https://ntvstream.cx/beta/stream.m3u8',
+    ]);
   });
 });

@@ -225,8 +225,42 @@ async function fetchRenderedHtml(url, logger, options = {}) {
         });
       }
 
-      if (captureStreams && response.url().includes('.m3u8')) {
-        discoveredStreams.add(response.url());
+      if (captureStreams) {
+        const responseUrl = response.url();
+        if (responseUrl.includes('.m3u8')) {
+          discoveredStreams.add(responseUrl);
+        } else {
+          const headers = response.headers?.() || {};
+          const contentType = headers['content-type'] || headers['Content-Type'] || '';
+          const isJavaScript = /javascript|ecmascript/i.test(contentType) || /\.js(\?|$)/i.test(responseUrl);
+          const isLikelyJwPlayerBundle = isJavaScript && /jwp|jwplayer/i.test(responseUrl);
+
+          if (isLikelyJwPlayerBundle) {
+            try {
+              const body = await response.text();
+              const extractedStreams = extractHlsStreamsFromJwPlayerBundle(body);
+
+              extractedStreams.forEach((url) => {
+                const normalized = normalizeStreamUrl(url);
+                if (normalized) discoveredStreams.add(normalized);
+              });
+
+              if (extractedStreams.length) {
+                logger?.info('Extracted streams from JWPlayer bundle', {
+                  url: normalizedUrl,
+                  responseUrl,
+                  count: extractedStreams.length,
+                });
+              }
+            } catch (error) {
+              logger?.debug('Failed to parse JWPlayer bundle response', {
+                url: normalizedUrl,
+                responseUrl,
+                error: error.message,
+              });
+            }
+          }
+        }
       }
     });
 
@@ -531,6 +565,38 @@ function normalizeStreamUrl(url) {
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   if (trimmed.startsWith('//')) return `https:${trimmed}`;
   return normalizeUrl(trimmed);
+}
+
+function extractHlsStreamsFromJwPlayerBundle(source = '') {
+  if (!source || typeof source !== 'string') return [];
+
+  const candidates = new Set();
+
+  const add = (value) => {
+    if (!value) return;
+    const cleaned = value
+      .replace(/\\\//g, '/')
+      .replace(/\\u0026/gi, '&')
+      .trim();
+
+    const normalized = normalizeStreamUrl(cleaned);
+    if (normalized) candidates.add(normalized);
+  };
+
+  const patterns = [
+    /file\s*[:=]\s*["'`]([^"'`]+?\.m3u8[^"'`]*)["'`]/gi,
+    /https?:\\{0,2}\/\\{0,2}[^"'`\s]+?\.m3u8[^"'`\s]*/gi,
+    /["'`]([^"'`\s]+?\.m3u8[^"'`]*)["'`]/gi,
+  ];
+
+  patterns.forEach((regex) => {
+    let match;
+    while ((match = regex.exec(source))) {
+      add(match[1] || match[0]);
+    }
+  });
+
+  return Array.from(candidates);
 }
 
 function collectStreamCandidates($ctx, html = '') {
@@ -916,4 +982,5 @@ module.exports = {
   scrapeFrontPage,
   createProgrammeFromEvent,
   buildDefaultStreamHeaders,
+  extractHlsStreamsFromJwPlayerBundle,
 };
