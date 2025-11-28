@@ -76,10 +76,18 @@ function renderChannels() {
     if (streamPath) {
       previewLink.disabled = false;
       previewLink.textContent = 'Preview stream';
-      previewPlayer?.classList.remove('hidden');
+      previewPlayer?.classList.add('hidden');
       previewLink.addEventListener('click', (e) => {
         e.preventDefault();
-        loadPreview(previewPlayer, streamPath);
+        if (previewPlayer.classList.contains('hidden')) {
+          loadPreview(previewPlayer, streamPath);
+          previewPlayer.classList.remove('hidden');
+          previewLink.textContent = 'Hide preview';
+        } else {
+          destroyPreviewPlayer(previewPlayer);
+          previewPlayer.classList.add('hidden');
+          previewLink.textContent = 'Preview stream';
+        }
       });
     } else {
       previewLink.disabled = false;
