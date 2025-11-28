@@ -3,6 +3,7 @@ const cheerio = require('cheerio');
 const dayjs = require('dayjs');
 const { chromium } = require('playwright');
 const fs = require('fs');
+const vm = require('vm');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
 
@@ -238,18 +239,26 @@ async function fetchRenderedHtml(url, logger, options = {}) {
           if (isLikelyJwPlayerBundle) {
             try {
               const body = await response.text();
-              const extractedStreams = extractHlsStreamsFromJwPlayerBundle(body);
+              const deobfuscated = deobfuscateLikelyPlayerScript(body, logger);
+              const extractedStreams = new Set();
+
+              extractHlsStreamsFromPlayerSource(body).forEach((url) => extractedStreams.add(url));
+
+              if (deobfuscated) {
+                extractHlsStreamsFromPlayerSource(deobfuscated).forEach((url) => extractedStreams.add(url));
+              }
 
               extractedStreams.forEach((url) => {
                 const normalized = normalizeStreamUrl(url);
                 if (normalized) discoveredStreams.add(normalized);
               });
 
-              if (extractedStreams.length) {
+              if (extractedStreams.size) {
                 logger?.info('Extracted streams from JWPlayer bundle', {
                   url: normalizedUrl,
                   responseUrl,
-                  count: extractedStreams.length,
+                  deobfuscated: Boolean(deobfuscated),
+                  count: extractedStreams.size,
                 });
               }
             } catch (error) {
@@ -583,6 +592,66 @@ function normalizeStreamUrl(url) {
   return normalizeUrl(trimmed);
 }
 
+function unpackPackerSource(source, logger) {
+  if (!/eval\(function\(p,a,c,k,e,d\)/i.test(source)) return null;
+
+  try {
+    const sandbox = { result: null };
+    vm.runInNewContext(`result = ${source}`, sandbox, { timeout: 200 });
+    const unpacked = sandbox.result;
+    if (typeof unpacked === 'string' && unpacked.length > 0) return unpacked;
+  } catch (error) {
+    logger?.debug('Failed to unpack p.a.c.k.e.r source', { error: error.message });
+  }
+
+  return null;
+}
+
+function tryDecodeBase64Payload(encoded) {
+  if (!encoded || encoded.length < 16 || encoded.length % 4 !== 0) return null;
+
+  try {
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    if (!decoded || /\u0000/.test(decoded)) return null;
+
+    try {
+      const parsed = JSON.parse(decoded);
+      if (typeof parsed === 'string') return parsed;
+      if (parsed && typeof parsed === 'object') return JSON.stringify(parsed);
+    } catch (parseError) {
+      // Not JSON, fall through to raw decoded content.
+    }
+
+    return decoded;
+  } catch (error) {
+    return null;
+  }
+}
+
+function unpackBase64Config(source) {
+  const base64Pattern = /["'`]([A-Za-z0-9+/=]{40,})["'`]/g;
+  let match;
+
+  while ((match = base64Pattern.exec(source))) {
+    const decoded = tryDecodeBase64Payload(match[1]);
+    if (decoded && decoded.length > 0) return decoded;
+  }
+
+  return null;
+}
+
+function deobfuscateLikelyPlayerScript(source = '', logger) {
+  if (!source || typeof source !== 'string') return null;
+
+  const packer = unpackPackerSource(source, logger);
+  if (packer) return packer;
+
+  const base64Decoded = unpackBase64Config(source);
+  if (base64Decoded) return base64Decoded;
+
+  return null;
+}
+
 function extractHlsStreamsFromJwPlayerBundle(source = '') {
   if (!source || typeof source !== 'string') return [];
 
@@ -611,6 +680,22 @@ function extractHlsStreamsFromJwPlayerBundle(source = '') {
       add(match[1] || match[0]);
     }
   });
+
+  return Array.from(candidates);
+}
+
+function extractHlsStreamsFromPlayerSource(source = '') {
+  if (!source || typeof source !== 'string') return [];
+
+  const candidates = new Set(extractHlsStreamsFromJwPlayerBundle(source));
+
+  const permissiveM3u8Regex = /https?:\/\/[\w.-]+[^\s"'`]+?\.m3u8[^\s"'`]*/gi;
+  let match;
+
+  while ((match = permissiveM3u8Regex.exec(source))) {
+    const normalized = normalizeStreamUrl(match[0]);
+    if (normalized) candidates.add(normalized);
+  }
 
   return Array.from(candidates);
 }
