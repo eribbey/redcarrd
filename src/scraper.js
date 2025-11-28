@@ -324,7 +324,23 @@ async function fetchRenderedHtml(url, logger, options = {}) {
       }
     }
 
-    await page.waitForLoadState('networkidle');
+    try {
+      await page.waitForLoadState('networkidle', { timeout: 15000 });
+    } catch (error) {
+      logger?.debug('Timed out waiting for network idle during render; proceeding anyway', {
+        url: normalizedUrl,
+        error: error.message,
+      });
+
+      try {
+        await page.waitForLoadState('load', { timeout: 5000 });
+      } catch (secondaryError) {
+        logger?.warn('Page load state check failed; continuing with available DOM', {
+          url: normalizedUrl,
+          error: secondaryError.message,
+        });
+      }
+    }
 
     if (waitForMatches) {
       try {
@@ -902,8 +918,12 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
       const discoveredStreams = Array.isArray(payload?.discoveredStreams) ? payload.discoveredStreams : [];
       const discoveredM3u8Count = discoveredStreams.filter((url) => url.includes('.m3u8')).length;
       const renderHadPageError = Boolean(payload?.pageErrorOccurred);
+      const renderFoundStream = Boolean(parsed.streamUrl || discoveredM3u8Count > 0);
 
-      if (renderHadPageError || discoveredM3u8Count === 0) {
+      const shouldFallback =
+        !renderFoundStream || (renderHadPageError && !parsed.streamUrl && discoveredM3u8Count === 0);
+
+      if (shouldFallback) {
         logger?.warn('Falling back to non-rendered fetch for embed after render diagnostics', {
           url: normalizedUrl,
           renderHadPageError,
