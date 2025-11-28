@@ -10,6 +10,7 @@ const state = {
 
 const logKeys = new Set();
 let logStream = null;
+const previewPlayers = new WeakMap();
 
 async function fetchState() {
   const res = await fetch('/api/state');
@@ -48,6 +49,7 @@ function renderChannels() {
     const sourceSelect = node.querySelector('.source');
     const qualitySelect = node.querySelector('.quality');
     const previewLink = node.querySelector('.preview-link');
+    const previewPlayer = node.querySelector('.preview-player');
 
     fillSelect(sourceSelect, channel.sourceOptions, channel.embedUrl);
     fillSelect(qualitySelect, channel.qualityOptions, channel.embedUrl);
@@ -70,10 +72,24 @@ function renderChannels() {
       await fetchState();
     });
 
-    previewLink.href = channel.streamUrl
-      ? `/hls/${encodeURIComponent(channel.id)}`
-      : channel.embedUrl;
-    previewLink.textContent = channel.streamUrl ? 'Preview stream' : 'Open embed';
+    const streamPath = channel.streamUrl ? `/hls/${encodeURIComponent(channel.id)}` : null;
+    if (streamPath) {
+      previewLink.disabled = false;
+      previewLink.textContent = 'Preview stream';
+      previewPlayer?.classList.remove('hidden');
+      previewLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        loadPreview(previewPlayer, streamPath);
+      });
+    } else {
+      previewLink.disabled = false;
+      previewLink.textContent = 'Open embed';
+      previewPlayer?.classList.add('hidden');
+      previewLink.addEventListener('click', (e) => {
+        e.preventDefault();
+        window.open(channel.embedUrl, '_blank', 'noopener');
+      });
+    }
 
     container.appendChild(node);
   });
@@ -118,6 +134,36 @@ function fillSelect(select, options, current) {
     if (opt.embedUrl === current) option.selected = true;
     select.appendChild(option);
   });
+}
+
+function destroyPreviewPlayer(videoEl) {
+  const player = previewPlayers.get(videoEl);
+  if (player?.hls) {
+    player.hls.destroy();
+  }
+  if (videoEl) {
+    videoEl.pause();
+    videoEl.removeAttribute('src');
+    videoEl.load();
+  }
+}
+
+function loadPreview(videoEl, url) {
+  if (!videoEl || !url) return;
+
+  destroyPreviewPlayer(videoEl);
+
+  if (window.Hls && window.Hls.isSupported()) {
+    const hls = new window.Hls();
+    hls.loadSource(url);
+    hls.attachMedia(videoEl);
+    previewPlayers.set(videoEl, { hls });
+  } else {
+    videoEl.src = url;
+    previewPlayers.set(videoEl, { hls: null });
+  }
+
+  videoEl.play()?.catch(() => {});
 }
 
 function renderLogs() {
