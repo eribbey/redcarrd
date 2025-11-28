@@ -3,25 +3,70 @@ const ChannelManager = require('../channelManager');
 describe('ChannelManager', () => {
   const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
 
-  test('builds channels with grouping', async () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('builds deterministic channels and reconciles updates', async () => {
     const manager = new ChannelManager({ lifetimeHours: 24, logger });
     const events = [
-      { title: 'A', category: 'football', embedUrl: 'https://example.com/embed/a', sourceOptions: [], qualityOptions: [] },
-      { title: 'B', category: 'football', embedUrl: 'https://example.com/embed/b', sourceOptions: [], qualityOptions: [] },
+      {
+        title: 'A',
+        startTime: '2024-01-01T12:00:00Z',
+        category: 'football',
+        embedUrl: 'https://example.com/embed/a',
+        sourceOptions: [],
+        qualityOptions: [],
+      },
+      {
+        title: 'B',
+        startTime: '2024-01-01T13:00:00Z',
+        category: 'football',
+        embedUrl: 'https://example.com/embed/b',
+        sourceOptions: [],
+        qualityOptions: [],
+      },
       { title: 'C', category: 'basketball', embedUrl: 'https://example.com/embed/c', sourceOptions: [], qualityOptions: [] },
     ];
 
     await manager.buildChannels(events, ['football']);
     expect(manager.channels).toHaveLength(2);
-    expect(manager.channels[0].id).toBe('football-1');
-    expect(manager.channels[1].id).toBe('football-2');
+    expect(manager.channels[0].id).toMatch(/^ch-/);
+    expect(manager.channels[1].id).toMatch(/^ch-/);
+
+    const originalId = manager.channels.find((channel) => channel.title === 'A').id;
+    const updatedEvents = [
+      {
+        title: 'A',
+        startTime: '2024-01-01T12:00:00Z',
+        category: 'football',
+        embedUrl: 'https://example.com/embed/a',
+        sourceOptions: [],
+        qualityOptions: [],
+      },
+      {
+        title: 'D',
+        startTime: '2024-01-01T14:00:00Z',
+        category: 'football',
+        embedUrl: 'https://example.com/embed/d',
+        sourceOptions: [],
+        qualityOptions: [],
+      },
+    ];
+
+    await manager.buildChannels(updatedEvents, ['football']);
+    expect(manager.channels).toHaveLength(2);
+    expect(manager.channels.find((channel) => channel.title === 'A').id).toBe(originalId);
+    expect(logger.info).toHaveBeenCalledWith('Reconciling channels', expect.objectContaining({
+      counts: expect.objectContaining({ added: 1, updated: 1 }),
+    }));
   });
 
   test('generates playlist and epg', () => {
     const manager = new ChannelManager({ lifetimeHours: 24, logger });
     manager.channels = [
       {
-        id: 'football-1',
+        id: 'ch-football',
         category: 'football',
         title: 'A',
         embedUrl: 'https://example.com/embed/a',
@@ -34,7 +79,7 @@ describe('ChannelManager', () => {
     ];
     manager.programmes = [
       {
-        channelId: 'football-1',
+        channelId: 'ch-football',
         title: 'A',
         category: 'football',
         start: new Date(),
@@ -44,18 +89,18 @@ describe('ChannelManager', () => {
     manager.playlistReady = true;
     const playlist = manager.generatePlaylist('http://localhost:3005');
     expect(playlist).toContain('#EXTM3U');
-    expect(playlist).toContain('/hls/football-1');
+    expect(playlist).toContain('/hls/ch-football');
 
     const epg = manager.generateEpg();
     expect(epg).toContain('<tv>');
-    expect(epg).toContain('football-1');
+    expect(epg).toContain('ch-football');
   });
 
   test('returns placeholder playlist when hydration not finished', () => {
     const manager = new ChannelManager({ lifetimeHours: 24, logger });
     manager.channels = [
       {
-        id: 'football-1',
+        id: 'ch-football',
         category: 'football',
         title: 'A',
         embedUrl: 'https://example.com/embed/a',
