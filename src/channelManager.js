@@ -110,6 +110,7 @@ class ChannelManager {
       requestHeaders,
       sourceOptions: event.sourceOptions || existing?.sourceOptions || [],
       qualityOptions: event.qualityOptions || existing?.qualityOptions || [],
+      cookies: embedUrlChanged ? [] : existing?.cookies || [],
       expiresAt,
     };
   }
@@ -161,6 +162,7 @@ class ChannelManager {
     channel.embedUrl = embedUrl;
     channel.streamUrl = null; // will be rehydrated on next run
     channel.requestHeaders = buildDefaultStreamHeaders(embedUrl);
+    channel.cookies = [];
     this.playlistReady = false;
     this.hydrationInProgress = false;
     this.logger?.info(`Updated source for ${channelId}`, { embedUrl });
@@ -173,6 +175,7 @@ class ChannelManager {
     channel.embedUrl = embedUrl;
     channel.streamUrl = null;
     channel.requestHeaders = buildDefaultStreamHeaders(embedUrl);
+    channel.cookies = [];
     this.playlistReady = false;
     this.hydrationInProgress = false;
     this.logger?.info(`Updated quality for ${channelId}`, { embedUrl });
@@ -247,18 +250,50 @@ class ChannelManager {
       }
     }
 
+    if (channel?.cookies?.length) {
+      headers.Cookie = channel.cookies.join('; ');
+    }
+
     return headers;
+  }
+
+  updateCookies(channel, setCookieHeaders = []) {
+    if (!channel || !Array.isArray(setCookieHeaders) || !setCookieHeaders.length) return;
+
+    const cookieMap = new Map();
+
+    (channel.cookies || []).forEach((cookie) => {
+      const [name] = cookie.split('=');
+      if (name) {
+        cookieMap.set(name.trim(), cookie.trim());
+      }
+    });
+
+    setCookieHeaders.forEach((raw) => {
+      if (!raw) return;
+      const [pair] = raw.split(';');
+      const [name] = pair.split('=');
+      if (name) {
+        cookieMap.set(name.trim(), pair.trim());
+      }
+    });
+
+    channel.cookies = Array.from(cookieMap.values());
   }
 
   async fetchStream(channel, targetUrl) {
     const headers = this.buildStreamHeaders(channel);
     this.logger?.debug('Proxying stream fetch', { channelId: channel?.id, targetUrl });
 
-    return axios.get(targetUrl, {
+    const response = await axios.get(targetUrl, {
       headers,
       responseType: 'arraybuffer',
       validateStatus: (status) => status >= 200 && status < 500,
     });
+
+    this.updateCookies(channel, response.headers['set-cookie']);
+
+    return response;
   }
 
   rewriteManifest(manifestBody, manifestUrl, baseProxyUrl) {
