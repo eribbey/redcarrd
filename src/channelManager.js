@@ -3,6 +3,7 @@ const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
 const { create } = require('xmlbuilder');
 const axios = require('axios');
+const crypto = require('crypto');
 const { resolveStreamFromEmbed, createProgrammeFromEvent, buildDefaultStreamHeaders } = require('./scraper');
 
 dayjs.extend(utc);
@@ -44,35 +45,43 @@ class ChannelManager {
       return acc;
     }, {});
 
-    this.logger?.info(`Rebuilding channels from ${filtered.length} events`, {
-      selectedCategories,
-      categoryCounts,
+    const existingChannels = new Map(this.channels.map((channel) => [channel.id, channel]));
+    const programmes = [];
+    const channels = [];
+    const expiresAt = dayjs().add(this.lifetimeHours, 'hour').toISOString();
+    let added = 0;
+    let updated = 0;
+
+    filtered.forEach((event) => {
+      const id = this.generateChannelId(event);
+      const existing = existingChannels.get(id);
+      const channel = this.createOrUpdateChannel(id, event, existing, expiresAt);
+      channels.push(channel);
+      programmes.push(createProgrammeFromEvent(event, id, this.lifetimeHours, this.timezone));
+      if (existing) {
+        updated += 1;
+      } else {
+        added += 1;
+      }
     });
 
-    const grouped = filtered.reduce((acc, event) => {
-      const category = event.category || 'uncategorized';
-      const arr = acc[category] || [];
-      arr.push(event);
-      acc[category] = arr;
-      return acc;
-    }, {});
+    const newIds = new Set(channels.map((channel) => channel.id));
+    const now = dayjs();
+    const removed = this.channels.filter(
+      (channel) => !newIds.has(channel.id) || (channel.expiresAt && dayjs(channel.expiresAt).isBefore(now)),
+    ).length;
 
-    const newChannels = [];
-    const programmes = [];
-
-    for (const [category, eventsForCategory] of Object.entries(grouped)) {
-      eventsForCategory.forEach((event, index) => {
-        const id = `${category}-${index + 1}`;
-        const channel = this.createChannel(id, category, event);
-        newChannels.push(channel);
-        programmes.push(createProgrammeFromEvent(event, id, this.lifetimeHours, this.timezone));
-      });
-    }
-
-    this.channels = newChannels;
+    this.channels = channels;
     this.programmes = programmes;
     this.playlistReady = false;
     this.hydrationInProgress = false;
+
+    this.logger?.info('Reconciling channels', {
+      selectedCategories,
+      categoryCounts,
+      counts: { total: filtered.length, added, updated, removed },
+    });
+
     if (!this.channels.length) {
       this.logger?.warn('No channels were created from events', { selectedCategories });
     }
@@ -80,17 +89,27 @@ class ChannelManager {
     return this.channels;
   }
 
-  createChannel(id, category, event) {
-    const expiresAt = dayjs().add(this.lifetimeHours, 'hour').toISOString();
+  generateChannelId(event) {
+    const key = `${event.title || ''}|${event.startTime || event.start || ''}|${event.embedUrl || ''}`;
+    const hash = crypto.createHash('sha256').update(key).digest('hex').slice(0, 12);
+    return `ch-${hash}`;
+  }
+
+  createOrUpdateChannel(id, event, existing, expiresAt) {
+    const embedUrlChanged = existing?.embedUrl && existing.embedUrl !== event.embedUrl;
+    const requestHeaders =
+      event.requestHeaders ||
+      (embedUrlChanged ? buildDefaultStreamHeaders(event.embedUrl) : existing?.requestHeaders || buildDefaultStreamHeaders(event.embedUrl));
+
     return {
       id,
-      category,
+      category: event.category || 'uncategorized',
       title: event.title,
       embedUrl: event.embedUrl,
-      streamUrl: event.streamUrl || null,
-      requestHeaders: event.requestHeaders || buildDefaultStreamHeaders(event.embedUrl),
-      sourceOptions: event.sourceOptions || [],
-      qualityOptions: event.qualityOptions || [],
+      streamUrl: embedUrlChanged ? null : event.streamUrl || existing?.streamUrl || null,
+      requestHeaders,
+      sourceOptions: event.sourceOptions || existing?.sourceOptions || [],
+      qualityOptions: event.qualityOptions || existing?.qualityOptions || [],
       expiresAt,
     };
   }
@@ -174,16 +193,11 @@ class ChannelManager {
       .filter((ch) => ch.streamUrl)
       .forEach((channel) => {
         lines.push(
-          `#EXTINF:-1 tvg-id="${channel.id}" group-title="${channel.category}",${channel.category} ${this.extractIndex(channel.id)}`,
+          `#EXTINF:-1 tvg-id="${channel.id}" group-title="${channel.category}",${channel.title || channel.category}`,
         );
         lines.push(`${baseUrl}/hls/${encodeURIComponent(channel.id)}`);
       });
     return lines.join('\n');
-  }
-
-  extractIndex(id) {
-    const parts = id.split('-');
-    return parts[parts.length - 1];
   }
 
   generateEpg() {
@@ -193,7 +207,7 @@ class ChannelManager {
       xml
         .ele('channel', { id: channel.id })
         .ele('display-name')
-        .txt(`${channel.category} ${this.extractIndex(channel.id)}`)
+        .txt(channel.title || channel.category)
         .up()
         .up();
     });

@@ -125,8 +125,8 @@ describe('scraper helpers', () => {
   });
 
   test('creates programme with default lifetime', () => {
-    const programme = createProgrammeFromEvent({ title: 'Match A', category: 'football' }, 'football-1', 24, 'UTC');
-    expect(programme.channelId).toBe('football-1');
+    const programme = createProgrammeFromEvent({ title: 'Match A', category: 'football' }, 'ch-football', 24, 'UTC');
+    expect(programme.channelId).toBe('ch-football');
     expect(programme.start).toBeInstanceOf(Date);
     expect(programme.stop).toBeInstanceOf(Date);
   });
