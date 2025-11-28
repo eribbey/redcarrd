@@ -3,6 +3,7 @@ const cheerio = require('cheerio');
 const dayjs = require('dayjs');
 const { chromium } = require('playwright');
 const fs = require('fs');
+const vm = require('vm');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
 
@@ -233,24 +234,35 @@ async function fetchRenderedHtml(url, logger, options = {}) {
           const headers = response.headers?.() || {};
           const contentType = headers['content-type'] || headers['Content-Type'] || '';
           const isJavaScript = /javascript|ecmascript/i.test(contentType) || /\.js(\?|$)/i.test(responseUrl);
-          const isLikelyJwPlayerBundle = isJavaScript && /jwp|jwplayer/i.test(responseUrl);
 
-          if (isLikelyJwPlayerBundle) {
+          if (isJavaScript) {
             try {
               const body = await response.text();
-              const extractedStreams = extractHlsStreamsFromJwPlayerBundle(body);
+              const isLikelyPlayerBundle = isLikelyPlayerScriptBundle(responseUrl, contentType, body);
 
-              extractedStreams.forEach((url) => {
-                const normalized = normalizeStreamUrl(url);
-                if (normalized) discoveredStreams.add(normalized);
-              });
+              if (isLikelyPlayerBundle) {
+                const deobfuscated = deobfuscateLikelyPlayerScript(body, logger);
+                const extractedStreams = new Set();
 
-              if (extractedStreams.length) {
-                logger?.info('Extracted streams from JWPlayer bundle', {
-                  url: normalizedUrl,
-                  responseUrl,
-                  count: extractedStreams.length,
+                extractHlsStreamsFromPlayerSource(body).forEach((url) => extractedStreams.add(url));
+
+                if (deobfuscated) {
+                  extractHlsStreamsFromPlayerSource(deobfuscated).forEach((url) => extractedStreams.add(url));
+                }
+
+                extractedStreams.forEach((url) => {
+                  const normalized = normalizeStreamUrl(url);
+                  if (normalized) discoveredStreams.add(normalized);
                 });
+
+                if (extractedStreams.size) {
+                  logger?.info('Extracted streams from player bundle', {
+                    url: normalizedUrl,
+                    responseUrl,
+                    deobfuscated: Boolean(deobfuscated),
+                    count: extractedStreams.size,
+                  });
+                }
               }
             } catch (error) {
               logger?.debug('Failed to parse JWPlayer bundle response', {
@@ -583,6 +595,79 @@ function normalizeStreamUrl(url) {
   return normalizeUrl(trimmed);
 }
 
+function unpackPackerSource(source, logger) {
+  if (!/eval\(function\(p,a,c,k,e,d\)/i.test(source)) return null;
+
+  try {
+    const sandbox = { result: null };
+    vm.runInNewContext(`result = ${source}`, sandbox, { timeout: 200 });
+    const unpacked = sandbox.result;
+    if (typeof unpacked === 'string' && unpacked.length > 0) return unpacked;
+  } catch (error) {
+    logger?.debug('Failed to unpack p.a.c.k.e.r source', { error: error.message });
+  }
+
+  return null;
+}
+
+function tryDecodeBase64Payload(encoded) {
+  if (!encoded || encoded.length < 16 || encoded.length % 4 !== 0) return null;
+
+  try {
+    const decoded = Buffer.from(encoded, 'base64').toString('utf8');
+    if (!decoded || /\u0000/.test(decoded)) return null;
+
+    try {
+      const parsed = JSON.parse(decoded);
+      if (typeof parsed === 'string') return parsed;
+      if (parsed && typeof parsed === 'object') return JSON.stringify(parsed);
+    } catch (parseError) {
+      // Not JSON, fall through to raw decoded content.
+    }
+
+    return decoded;
+  } catch (error) {
+    return null;
+  }
+}
+
+function unpackBase64Config(source) {
+  const base64Pattern = /["'`]([A-Za-z0-9+/=]{40,})["'`]/g;
+  let match;
+
+  while ((match = base64Pattern.exec(source))) {
+    const decoded = tryDecodeBase64Payload(match[1]);
+    if (decoded && decoded.length > 0) return decoded;
+  }
+
+  return null;
+}
+
+function isLikelyPlayerScriptBundle(url = '', contentType = '', source = '') {
+  const lowerUrl = url.toLowerCase();
+  const hasPlayerName = /player|jwplayer|jwp|hls|bundle/.test(lowerUrl);
+  const looksLikeScript = /javascript|ecmascript/.test(contentType) || /\.js(\?|$)/.test(lowerUrl);
+
+  if (!looksLikeScript) return false;
+
+  const trimmedSource = (source || '').slice(0, 50000);
+  const sourceHints = /jwplayer|jwsetup|playlist|sources|file\s*[:=]|\.m3u8|hls/i.test(trimmedSource);
+
+  return hasPlayerName || sourceHints;
+}
+
+function deobfuscateLikelyPlayerScript(source = '', logger) {
+  if (!source || typeof source !== 'string') return null;
+
+  const packer = unpackPackerSource(source, logger);
+  if (packer) return packer;
+
+  const base64Decoded = unpackBase64Config(source);
+  if (base64Decoded) return base64Decoded;
+
+  return null;
+}
+
 function extractHlsStreamsFromJwPlayerBundle(source = '') {
   if (!source || typeof source !== 'string') return [];
 
@@ -611,6 +696,22 @@ function extractHlsStreamsFromJwPlayerBundle(source = '') {
       add(match[1] || match[0]);
     }
   });
+
+  return Array.from(candidates);
+}
+
+function extractHlsStreamsFromPlayerSource(source = '') {
+  if (!source || typeof source !== 'string') return [];
+
+  const candidates = new Set(extractHlsStreamsFromJwPlayerBundle(source));
+
+  const permissiveM3u8Regex = /https?:\/\/[\w.-]+[^\s"'`]+?\.m3u8[^\s"'`]*/gi;
+  let match;
+
+  while ((match = permissiveM3u8Regex.exec(source))) {
+    const normalized = normalizeStreamUrl(match[0]);
+    if (normalized) candidates.add(normalized);
+  }
 
   return Array.from(candidates);
 }
