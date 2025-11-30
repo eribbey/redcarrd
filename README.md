@@ -1,6 +1,8 @@
 # redcarrd
 
-Self-hosted IPTV proxy that scrapes events  and exposes dynamic playlists and EPG data. The app runs on port 3005 by default and includes a configuration UI for selecting categories, tuning rebuild cadence, previewing streams, and inspecting logs.
+**Work-in-progress to replace dlhd-proxy for sports**
+
+Self-hosted IPTV proxy that scrapes events and exposes dynamic playlists and EPG data. The app runs on port 3005 by default and includes a configuration UI for selecting categories, tuning rebuild cadence, previewing streams, and inspecting logs.
 
 ## Features
 - Scrape for events and build category-based channels with sequential numbering.
