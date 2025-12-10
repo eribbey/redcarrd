@@ -38,6 +38,12 @@ const embedHtmlWithOnclickOptions = `
 </div>
 `;
 
+const embedHtmlWithRelativeStream = `
+<div>
+  <iframe id="streamIframe" src="/live/path/relative.m3u8"></iframe>
+</div>
+`;
+
 describe('scraper helpers', () => {
   test('buildEventsFromApi keeps all sources and maps start time', () => {
     const timezoneName = 'UTC';
@@ -128,6 +134,11 @@ describe('scraper helpers', () => {
   test('parses embed options when value attribute is missing', () => {
     const result = parseEmbedPage(embedHtmlWithOnclickOptions);
     expect(result.sourceOptions.map((opt) => opt.embedUrl)).toEqual(['/embed/stream1', '/embed/stream2']);
+  });
+
+  test('normalizes relative stream URLs against embed host', () => {
+    const result = parseEmbedPage(embedHtmlWithRelativeStream, undefined, 'https://embedsports.top/embed/game-1');
+    expect(result.streamUrl).toBe('https://embedsports.top/live/path/relative.m3u8');
   });
 
   test('resolves stream from embed via HTTP', async () => {
