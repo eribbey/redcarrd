@@ -158,6 +158,8 @@ class ChannelManager {
           channel.streamUrl = result.streamUrl;
           channel.streamMimeType = result.streamMimeType || guessMimeTypeFromUrl(result.streamUrl);
           channel.requestHeaders = result.requestHeaders || channel.requestHeaders;
+          if (result.cookies?.length) channel.cookies = result.cookies;
+          if (result.setCookieHeaders?.length) this.updateCookies(channel, result.setCookieHeaders);
           channel.sourceOptions = result.sourceOptions?.length ? result.sourceOptions : channel.sourceOptions;
           channel.qualityOptions = result.qualityOptions?.length ? result.qualityOptions : channel.qualityOptions;
           this.logger?.info(`Resolved stream for channel ${channel.id}`, { streamUrl: channel.streamUrl });
@@ -205,6 +207,8 @@ class ChannelManager {
     channel.streamUrl = result.streamUrl;
     channel.streamMimeType = result.streamMimeType || guessMimeTypeFromUrl(result.streamUrl);
     channel.requestHeaders = result.requestHeaders || channel.requestHeaders;
+    if (result.cookies?.length) channel.cookies = result.cookies;
+    if (result.setCookieHeaders?.length) this.updateCookies(channel, result.setCookieHeaders);
     return channel;
   }
 
