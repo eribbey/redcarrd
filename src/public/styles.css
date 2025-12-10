@@ -19,6 +19,19 @@ body {
   padding: 24px;
 }
 
+.hidden {
+  display: none !important;
+}
+
+.toast {
+  background: rgba(248, 113, 113, 0.15);
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  color: #fecdd3;
+  padding: 12px 14px;
+  border-radius: 10px;
+  margin-bottom: 16px;
+}
+
 header {
   margin-bottom: 24px;
 }

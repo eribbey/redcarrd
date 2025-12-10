@@ -12,17 +12,38 @@ const logKeys = new Set();
 let logStream = null;
 const previewPlayers = new WeakMap();
 
+function showError(message) {
+  const banner = document.getElementById('errorBanner');
+  if (!banner) return;
+  banner.textContent = message;
+  banner.classList.remove('hidden');
+}
+
+function clearError() {
+  const banner = document.getElementById('errorBanner');
+  if (!banner) return;
+  banner.textContent = '';
+  banner.classList.add('hidden');
+}
+
 async function fetchState() {
-  const res = await fetch('/api/state');
-  const data = await res.json();
-  state.channels = data.channels;
-  state.config = data.config;
-  state.playlistReady = data.playlistReady;
-  state.hydrating = data.hydrating;
-  renderConfig();
-  renderChannels();
-  syncLogs(data.logs);
-  renderPlaylistStatus();
+  try {
+    const res = await fetch('/api/state');
+    if (!res.ok) throw new Error('Failed to fetch state');
+    const data = await res.json();
+    state.channels = data.channels;
+    state.config = data.config;
+    state.playlistReady = data.playlistReady;
+    state.hydrating = data.hydrating;
+    renderConfig();
+    renderChannels();
+    syncLogs(data.logs);
+    renderPlaylistStatus();
+    clearError();
+  } catch (error) {
+    console.error('Unable to fetch state', error);
+    showError('Unable to load the latest state. Please try again.');
+  }
 }
 
 function renderConfig() {
@@ -54,22 +75,53 @@ function renderChannels() {
     fillSelect(sourceSelect, channel.sourceOptions, channel.embedUrl);
     fillSelect(qualitySelect, channel.qualityOptions, channel.embedUrl);
 
+    sourceSelect.dataset.currentValue = channel.embedUrl;
+    qualitySelect.dataset.currentValue = channel.embedUrl;
+
     sourceSelect.addEventListener('change', async (e) => {
-      await fetch(`/api/channel/${channel.id}/source`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ embedUrl: e.target.value }),
-      });
-      await fetchState();
+      const select = e.target;
+      const previousValue = select.dataset.currentValue || select.value;
+      select.disabled = true;
+      try {
+        const res = await fetch(`/api/channel/${channel.id}/source`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ embedUrl: select.value }),
+        });
+        if (!res.ok) throw new Error('Failed to update source');
+        await fetchState();
+        select.dataset.currentValue = select.value;
+        clearError();
+      } catch (error) {
+        console.error('Failed to update channel source', error);
+        showError('Unable to update channel source. Please try again.');
+        select.value = previousValue;
+      } finally {
+        select.disabled = false;
+      }
     });
 
     qualitySelect.addEventListener('change', async (e) => {
-      await fetch(`/api/channel/${channel.id}/quality`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ embedUrl: e.target.value }),
-      });
-      await fetchState();
+      const select = e.target;
+      const previousValue = select.dataset.currentValue || select.value;
+      select.disabled = true;
+      try {
+        const res = await fetch(`/api/channel/${channel.id}/quality`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ embedUrl: select.value }),
+        });
+        if (!res.ok) throw new Error('Failed to update quality');
+        await fetchState();
+        select.dataset.currentValue = select.value;
+        clearError();
+      } catch (error) {
+        console.error('Failed to update channel quality', error);
+        showError('Unable to update channel quality. Please try again.');
+        select.value = previousValue;
+      } finally {
+        select.disabled = false;
+      }
     });
 
     const streamPath = channel.streamUrl ? `/hls/${encodeURIComponent(channel.id)}` : null;
@@ -265,6 +317,12 @@ function startLogStream() {
 
 async function saveConfig(evt) {
   evt.preventDefault();
+  const submitBtn = evt.submitter || document.querySelector('#configForm button[type="submit"]');
+  const originalText = submitBtn?.textContent;
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Saving...';
+  }
   const categories = document
     .getElementById('categories')
     .value.split(',')
@@ -273,22 +331,47 @@ async function saveConfig(evt) {
   const rebuildIntervalMinutes = Number(document.getElementById('interval').value);
   const lifetimeHours = Number(document.getElementById('lifetime').value);
 
-  await fetch('/api/config', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ categories, rebuildIntervalMinutes, lifetimeHours }),
-  });
-  await fetchState();
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ categories, rebuildIntervalMinutes, lifetimeHours }),
+    });
+    if (!res.ok) throw new Error('Failed to save configuration');
+    await fetchState();
+    clearError();
+  } catch (error) {
+    console.error('Failed to save configuration', error);
+    showError('Unable to save configuration. Please try again.');
+  } finally {
+    if (submitBtn) {
+      submitBtn.textContent = originalText || 'Save configuration';
+      submitBtn.disabled = false;
+    }
+  }
 }
 
 async function rebuild() {
   const button = document.getElementById('rebuildBtn');
-  button.disabled = true;
-  button.textContent = 'Rebuilding...';
-  await fetch('/api/rebuild', { method: 'POST' });
-  await fetchState();
-  button.textContent = 'Rebuild now';
-  button.disabled = false;
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Rebuilding...';
+  }
+  try {
+    const res = await fetch('/api/rebuild', { method: 'POST' });
+    if (!res.ok) throw new Error('Failed to rebuild');
+    await fetchState();
+    clearError();
+  } catch (error) {
+    console.error('Failed to rebuild channels', error);
+    showError('Rebuild failed. Please try again.');
+  } finally {
+    if (button) {
+      button.textContent = originalText || 'Rebuild now';
+      button.disabled = false;
+    }
+  }
 }
 
 document.getElementById('configForm').addEventListener('submit', saveConfig);
