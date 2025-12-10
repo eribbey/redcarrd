@@ -249,10 +249,12 @@ async function fetchRenderedHtml(url, logger, options = {}) {
       });
 
       page.on('response', async (response) => {
+        const status = response.status();
+
         if (!response.ok()) {
           logger?.warn('Non-OK response while rendering', {
             url: normalizedUrl,
-            status: response.status(),
+            status,
             statusText: response.statusText(),
             responseUrl: response.url(),
           });
@@ -270,6 +272,8 @@ async function fetchRenderedHtml(url, logger, options = {}) {
         }
 
         if (captureStreams) {
+          if (!response.ok()) return;
+
           const responseUrl = response.url();
           const headers = response.headers?.() || {};
           const contentType = headers['content-type'] || headers['Content-Type'] || '';
@@ -281,7 +285,7 @@ async function fetchRenderedHtml(url, logger, options = {}) {
 
           if (isPlayableMedia) {
             const mimeType = contentType || guessMimeTypeFromUrl(responseUrl);
-            discoveredStreams.set(responseUrl, { url: responseUrl, mimeType, isHls });
+            discoveredStreams.set(responseUrl, { url: responseUrl, mimeType, isHls, status });
           } else {
             const isJavaScript = /javascript|ecmascript/i.test(contentType) || /\.js(\?|$)/i.test(responseUrl);
             const isLikelyJwPlayerBundle = isJavaScript && /jwp|jwplayer/i.test(responseUrl);
@@ -312,6 +316,7 @@ async function fetchRenderedHtml(url, logger, options = {}) {
                     url: normalized,
                     mimeType,
                     isHls: normalized.includes('.m3u8'),
+                    status,
                   });
                 }
               });
