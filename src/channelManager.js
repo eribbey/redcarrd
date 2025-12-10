@@ -112,6 +112,9 @@ class ChannelManager {
       sourceOptions: event.sourceOptions || existing?.sourceOptions || [],
       qualityOptions: event.qualityOptions || existing?.qualityOptions || [],
       cookies: embedUrlChanged ? [] : existing?.cookies || [],
+      selectedSource: event.sourceOptions?.length
+        ? { source: event.sourceOptions[0].source, sourceId: event.sourceOptions[0].sourceId }
+        : existing?.selectedSource || null,
       expiresAt,
     };
   }
@@ -160,9 +163,13 @@ class ChannelManager {
   selectSource(channelId, embedUrl) {
     const channel = this.channels.find((c) => c.id === channelId);
     if (!channel) return null;
+    const selectedOption = channel.sourceOptions?.find((option) => option.embedUrl === embedUrl);
     channel.embedUrl = embedUrl;
     channel.streamUrl = null; // will be rehydrated on next run
-    channel.requestHeaders = buildDefaultStreamHeaders(embedUrl);
+    channel.requestHeaders = selectedOption?.requestHeaders || buildDefaultStreamHeaders(embedUrl);
+    channel.selectedSource = selectedOption
+      ? { source: selectedOption.source, sourceId: selectedOption.sourceId }
+      : channel.selectedSource;
     channel.cookies = [];
     this.playlistReady = false;
     this.hydrationInProgress = false;

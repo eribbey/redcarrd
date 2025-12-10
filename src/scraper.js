@@ -1161,16 +1161,13 @@ function buildEventsFromApi(matches = [], baseUrl, timezoneName = 'UTC', logger)
   const now = dayjs();
 
   matches.forEach((match) => {
-    const adminSource = (match?.sources || []).find(
-      (source) => source?.source?.toLowerCase?.() === 'admin' && source?.id,
-    );
-
-    if (!adminSource) return;
+    const sources = (match?.sources || []).filter((source) => source?.source && source?.id);
+    if (!sources.length) return;
 
     const title =
       match?.title ||
       [match?.teams?.home?.name, match?.teams?.away?.name].filter(Boolean).join(' vs ') ||
-      adminSource.id;
+      sources[0].id;
 
     const category = (match?.category || 'general').toString().toLowerCase();
     const startTime = match?.date ? dayjs(match.date).tz(timezoneName).toDate() : now.toDate();
@@ -1179,7 +1176,7 @@ function buildEventsFromApi(matches = [], baseUrl, timezoneName = 'UTC', logger)
       title,
       category,
       embedUrl: null,
-      adminSource,
+      sources,
       startTime,
       baseUrl,
     });
@@ -1198,47 +1195,53 @@ async function scrapeFrontPage(frontPageUrl, timezoneName = 'UTC', logger) {
     const hydrated = [];
 
     for (const event of preliminary) {
-      const { adminSource } = event;
-      try {
-        const streams = await fetchStreamsForSource(normalizedUrl, adminSource.source, adminSource.id, logger);
-        if (!streams.length) continue;
+      const streamOptions = [];
 
-        const sortedStreams = streams.slice().sort((a, b) => {
-          if (a.hd === b.hd) return (b.viewers || 0) - (a.viewers || 0);
-          return a.hd ? -1 : 1;
-        });
+      for (const source of event.sources || []) {
+        try {
+          const streams = await fetchStreamsForSource(normalizedUrl, source.source, source.id, logger);
+          if (!streams.length) continue;
 
-        const streamOptions = sortedStreams
-          .map((stream) => ({
-            label: `Admin ${stream.streamNo || 1}${stream.hd ? ' (HD)' : ''}${
-              stream.language ? ` ${stream.language}` : ''
-            }`,
-            embedUrl: normalizeUrl(stream.embedUrl),
-            requestHeaders: buildDefaultStreamHeaders(stream.embedUrl),
-          }))
-          .filter((opt) => opt.embedUrl);
+          const sortedStreams = streams.slice().sort((a, b) => {
+            if (a.hd === b.hd) return (b.viewers || 0) - (a.viewers || 0);
+            return a.hd ? -1 : 1;
+          });
 
-        if (!streamOptions.length) continue;
-
-        const primary = streamOptions[0];
-
-        hydrated.push({
-          title: event.title,
-          category: event.category,
-          embedUrl: primary.embedUrl,
-          streamUrl: null,
-          sourceOptions: streamOptions,
-          qualityOptions: streamOptions,
-          startTime: event.startTime,
-          requestHeaders: primary.requestHeaders,
-        });
-      } catch (error) {
-        logger?.warn('Failed to fetch admin streams for match', {
-          source: adminSource?.source,
-          id: adminSource?.id,
-          error: error.message,
-        });
+          sortedStreams
+            .map((stream) => ({
+              label: `${source.source.toUpperCase?.() || source.source} #${stream.streamNo || 1}${
+                stream.language ? ` (${stream.language})` : ''
+              }${stream.hd ? ' HD' : ''}`.trim(),
+              embedUrl: normalizeUrl(stream.embedUrl),
+              requestHeaders: buildDefaultStreamHeaders(stream.embedUrl),
+              source: source.source,
+              sourceId: source.id,
+            }))
+            .filter((opt) => opt.embedUrl)
+            .forEach((opt) => streamOptions.push(opt));
+        } catch (error) {
+          logger?.warn('Failed to fetch streams for source', {
+            source: source?.source,
+            id: source?.id,
+            error: error.message,
+          });
+        }
       }
+
+      if (!streamOptions.length) continue;
+
+      const primary = streamOptions[0];
+
+      hydrated.push({
+        title: event.title,
+        category: event.category,
+        embedUrl: primary.embedUrl,
+        streamUrl: null,
+        sourceOptions: streamOptions,
+        qualityOptions: [],
+        startTime: event.startTime,
+        requestHeaders: primary.requestHeaders,
+      });
     }
 
     if (!hydrated.length) {
