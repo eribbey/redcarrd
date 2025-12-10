@@ -1146,6 +1146,25 @@ function parseEmbedPage(payload, logger, baseUrl) {
 async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
   const useRenderer = options.useRenderer ?? process.env.SCRAPER_RENDER_WITH_JS !== 'false';
   const normalizedUrl = normalizeUrl(embedUrl);
+  const buildCookieMetadata = (payload = {}) => {
+    const cookies = Array.isArray(payload.cookies)
+      ? payload.cookies
+          .filter((cookie) => cookie?.name && typeof cookie.value !== 'undefined')
+          .map((cookie) => `${cookie.name}=${cookie.value}`)
+      : [];
+
+    const setCookieHeaders = Array.isArray(payload.setCookieHeaders)
+      ? payload.setCookieHeaders.filter(Boolean)
+      : [];
+
+    const cookieHeader = payload.cookieHeader || (cookies.length ? cookies.join('; ') : '');
+    const requestHeaders = { ...buildDefaultStreamHeaders(normalizedUrl) };
+
+    if (cookieHeader) requestHeaders.Cookie = cookieHeader;
+
+    return { cookies, cookieHeader, setCookieHeaders, requestHeaders };
+  };
+
   try {
     const payload = useRenderer
       ? await fetchRenderedHtml(normalizedUrl, logger, { captureStreams: true, waitForMatches: false })
@@ -1180,11 +1199,12 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
           acceptLanguage: 'en-US,en;q=0.9',
         });
         const fallbackParsed = parseEmbedPage(html, logger, normalizedUrl);
-        return { ...fallbackParsed, requestHeaders: buildDefaultStreamHeaders(normalizedUrl) };
+        const cookieMetadata = buildCookieMetadata(payload);
+        return { ...fallbackParsed, ...cookieMetadata };
       }
     }
-
-    return { ...parsed, requestHeaders: buildDefaultStreamHeaders(normalizedUrl) };
+    const cookieMetadata = buildCookieMetadata(useRenderer ? payload : {});
+    return { ...parsed, ...cookieMetadata };
   } catch (error) {
     logger?.error('Failed to resolve stream from embed', { url: normalizedUrl, error: error.message });
 
@@ -1196,7 +1216,8 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
         acceptLanguage: 'en-US,en;q=0.9',
       });
       const parsed = parseEmbedPage(html, logger, normalizedUrl);
-      return { ...parsed, requestHeaders: buildDefaultStreamHeaders(normalizedUrl) };
+      const cookieMetadata = buildCookieMetadata(error || {});
+      return { ...parsed, ...cookieMetadata };
     }
 
     throw error;
