@@ -154,7 +154,7 @@ async function fetchRenderedHtml(url, logger, options = {}) {
     let browser;
     let context;
     const setCookieHeaders = new Set();
-    const discoveredStreams = new Set();
+      const discoveredStreams = new Map();
     let pageErrorOccurred = false;
 
     try {
@@ -271,11 +271,18 @@ async function fetchRenderedHtml(url, logger, options = {}) {
 
         if (captureStreams) {
           const responseUrl = response.url();
-          if (responseUrl.includes('.m3u8')) {
-            discoveredStreams.add(responseUrl);
+          const headers = response.headers?.() || {};
+          const contentType = headers['content-type'] || headers['Content-Type'] || '';
+          const isHls = responseUrl.includes('.m3u8') || /mpegurl/i.test(contentType);
+          const isPlayableMedia =
+            isHls ||
+            /dash\+xml|application\/mp4|video\//i.test(contentType) ||
+            /\.(mp4|m4s|mpd)(\?|$)/i.test(responseUrl);
+
+          if (isPlayableMedia) {
+            const mimeType = contentType || guessMimeTypeFromUrl(responseUrl);
+            discoveredStreams.set(responseUrl, { url: responseUrl, mimeType, isHls });
           } else {
-            const headers = response.headers?.() || {};
-            const contentType = headers['content-type'] || headers['Content-Type'] || '';
             const isJavaScript = /javascript|ecmascript/i.test(contentType) || /\.js(\?|$)/i.test(responseUrl);
             const isLikelyJwPlayerBundle = isJavaScript && /jwp|jwplayer/i.test(responseUrl);
 
@@ -299,7 +306,14 @@ async function fetchRenderedHtml(url, logger, options = {}) {
 
               extractedStreams.forEach((url) => {
                 const normalized = normalizeStreamUrl(url);
-                if (normalized) discoveredStreams.add(normalized);
+                if (normalized) {
+                  const mimeType = guessMimeTypeFromUrl(normalized);
+                  discoveredStreams.set(normalized, {
+                    url: normalized,
+                    mimeType,
+                    isHls: normalized.includes('.m3u8'),
+                  });
+                }
               });
 
               if (extractedStreams.length) {
@@ -533,7 +547,7 @@ async function fetchRenderedHtml(url, logger, options = {}) {
         return {
           html: content,
           pageData,
-          discoveredStreams: Array.from(discoveredStreams),
+          discoveredStreams: Array.from(discoveredStreams.values()),
           pageErrorOccurred,
           cookies: contextCookies,
           cookieHeader: lastCookieHeader,
@@ -683,6 +697,13 @@ function normalizeStreamUrl(url) {
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   if (trimmed.startsWith('//')) return `https:${trimmed}`;
   return normalizeUrl(trimmed);
+}
+
+function guessMimeTypeFromUrl(url = '') {
+  if (/\.m3u8(\?|$)/i.test(url)) return 'application/vnd.apple.mpegurl';
+  if (/\.mpd(\?|$)/i.test(url)) return 'application/dash+xml';
+  if (/\.(mp4|m4s)(\?|$)/i.test(url)) return 'video/mp4';
+  return '';
 }
 
 function extractHlsStreamsFromSource(source = '') {
@@ -1048,21 +1069,48 @@ function parseEmbedPage(payload, logger) {
 
   const qualityOptions = collectOptions($('body'), '#qualitySelect option, select[name*="quality"] option', $);
 
-  const embeddedStreams = Array.isArray(payload?.discoveredStreams) ? payload.discoveredStreams : [];
-  const directStreams = Array.from(new Set([...embeddedStreams, ...collectStreamCandidates($, html)]));
+  const normalizeDiscoveredStreams = () => {
+    if (!Array.isArray(payload?.discoveredStreams)) return [];
+    return payload.discoveredStreams
+      .map((entry) => {
+        if (typeof entry === 'string') {
+          return { url: entry, mimeType: guessMimeTypeFromUrl(entry), isHls: entry.includes('.m3u8') };
+        }
+
+        if (entry && typeof entry === 'object' && entry.url) {
+          return {
+            url: entry.url,
+            mimeType: entry.mimeType || guessMimeTypeFromUrl(entry.url),
+            isHls: Boolean(entry.isHls || entry.url.includes('.m3u8')),
+          };
+        }
+
+        return null;
+      })
+      .filter(Boolean);
+  };
+
+  const discoveredStreams = normalizeDiscoveredStreams();
+  const directStreams = Array.from(
+    new Set([...discoveredStreams.map((entry) => entry.url), ...collectStreamCandidates($, html)]),
+  );
   const streamUrl =
     directStreams.find((url) => url.includes('.m3u8')) ||
     normalizeStreamUrl(initialStream) ||
     directStreams[0] ||
     null;
 
+  const matchedDiscovered = discoveredStreams.find((entry) => entry.url === streamUrl);
+  const streamMimeType = matchedDiscovered?.mimeType || guessMimeTypeFromUrl(streamUrl);
+
   logger?.debug('Parsed embed page', {
     streamUrl,
+    streamMimeType,
     directStreams: directStreams.length,
     sourceOptions: sourceOptions.length,
     qualityOptions: qualityOptions.length,
   });
-  return { streamUrl, sourceOptions, qualityOptions };
+  return { streamUrl, streamMimeType, sourceOptions, qualityOptions };
 }
 
 async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
@@ -1077,7 +1125,10 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
 
     if (useRenderer) {
       const discoveredStreams = Array.isArray(payload?.discoveredStreams) ? payload.discoveredStreams : [];
-      const discoveredM3u8Count = discoveredStreams.filter((url) => url.includes('.m3u8')).length;
+      const discoveredM3u8Count = discoveredStreams.filter((entry) => {
+        const url = entry?.url || entry;
+        return typeof url === 'string' && url.includes('.m3u8');
+      }).length;
       const renderHadPageError = Boolean(payload?.pageErrorOccurred);
       const renderFoundStream = Boolean(parsed.streamUrl || discoveredM3u8Count > 0);
 

@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
 const bodyParser = require('body-parser');
+const fs = require('fs');
+const path = require('path');
 const Logger = require('./logger');
 const { loadConfig, saveConfig, defaultConfig } = require('./config');
 const ChannelManager = require('./channelManager');
@@ -197,13 +199,35 @@ async function handleHlsResponse(req, res, targetUrl, channel, isRootManifest = 
   }
 }
 
+async function serveTransmuxedManifest(req, res, channel) {
+  try {
+    const job = await channelManager.ensureTransmuxed(channel);
+    const manifestBody = await fs.promises.readFile(job.manifestPath, 'utf8');
+    const base = `${req.protocol}://${req.get('host')}/hls/${encodeURIComponent(channel.id)}/local`;
+    const rewritten = channelManager.rewriteLocalManifest(manifestBody, base);
+    res.set('Content-Type', 'application/vnd.apple.mpegurl');
+    return res.send(rewritten);
+  } catch (error) {
+    logger.error('Failed to serve transmuxed manifest', {
+      channelId: channel?.id,
+      targetUrl: channel?.streamUrl,
+      message: error.message,
+    });
+    return res.status(502).send('Failed to transmux stream');
+  }
+}
+
 app.get('/hls/:id', async (req, res) => {
   const channel = channelManager.getChannelById(req.params.id);
   if (!channel || !channel.streamUrl) {
     return res.status(404).send('Channel not found or stream unavailable');
   }
 
-  return handleHlsResponse(req, res, channel.streamUrl, channel, true);
+  if (channelManager.isHlsChannel(channel)) {
+    return handleHlsResponse(req, res, channel.streamUrl, channel, true);
+  }
+
+  return serveTransmuxedManifest(req, res, channel);
 });
 
 app.get('/hls/:id/proxy', async (req, res) => {
@@ -214,11 +238,46 @@ app.get('/hls/:id/proxy', async (req, res) => {
     return res.status(404).send('Channel not found or stream unavailable');
   }
 
+  if (!channelManager.isHlsChannel(channel)) {
+    return res.status(400).send('Channel is being transmuxed; direct proxy not available');
+  }
+
   if (!targetUrl) {
     return res.status(400).send('Missing url parameter');
   }
 
   return handleHlsResponse(req, res, targetUrl, channel, false);
+});
+
+app.get('/hls/:id/local/:segment', async (req, res) => {
+  const channel = channelManager.getChannelById(req.params.id);
+  if (!channel || channelManager.isHlsChannel(channel)) {
+    return res.status(404).send('Channel not found or not transmuxed');
+  }
+
+  const job = channelManager.getTransmuxJob(req.params.id);
+  if (!job) {
+    return res.status(404).send('Transmuxed content unavailable');
+  }
+
+  const requested = decodeURIComponent(req.params.segment || '');
+  const resolved = path.resolve(job.workDir, requested);
+  if (!resolved.startsWith(job.workDir)) {
+    return res.status(400).send('Invalid segment path');
+  }
+
+  try {
+    const buffer = await fs.promises.readFile(resolved);
+    res.set('Content-Type', 'video/mp2t');
+    return res.send(buffer);
+  } catch (error) {
+    logger.error('Failed to serve transmuxed segment', {
+      channelId: channel.id,
+      segment: requested,
+      message: error.message,
+    });
+    return res.status(404).send('Segment not found');
+  }
 });
 
 app.get('/epg.xml', (req, res) => {

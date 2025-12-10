@@ -6,11 +6,19 @@ const axios = require('axios');
 const crypto = require('crypto');
 const https = require('https');
 const { resolveStreamFromEmbed, createProgrammeFromEvent, buildDefaultStreamHeaders } = require('./scraper');
+const Transmuxer = require('./transmuxer');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
 const DEFAULT_HYDRATION_CONCURRENCY = 5;
+
+function guessMimeTypeFromUrl(url = '') {
+  if (/\.m3u8(\?|$)/i.test(url)) return 'application/vnd.apple.mpegurl';
+  if (/\.mpd(\?|$)/i.test(url)) return 'application/dash+xml';
+  if (/\.(mp4|m4s)(\?|$)/i.test(url)) return 'video/mp4';
+  return '';
+}
 
 class ChannelManager {
   constructor({
@@ -29,6 +37,8 @@ class ChannelManager {
     this.hydrationConcurrency = Math.max(1, hydrationConcurrency || DEFAULT_HYDRATION_CONCURRENCY);
     this.playlistReady = false;
     this.hydrationInProgress = false;
+    this.transmuxer = new Transmuxer({ logger });
+    this.transmuxJobs = new Map();
   }
 
   async buildChannels(events, selectedCategories = []) {
@@ -68,14 +78,16 @@ class ChannelManager {
 
     const newIds = new Set(channels.map((channel) => channel.id));
     const now = dayjs();
-    const removed = this.channels.filter(
+    const removedChannels = this.channels.filter(
       (channel) => !newIds.has(channel.id) || (channel.expiresAt && dayjs(channel.expiresAt).isBefore(now)),
-    ).length;
+    );
+    const removed = removedChannels.length;
 
     this.channels = channels;
     this.programmes = programmes;
     this.playlistReady = false;
     this.hydrationInProgress = false;
+    this.cleanupTransmuxJobs(removedChannels.map((channel) => channel.id));
 
     this.logger?.info('Reconciling channels', {
       selectedCategories,
@@ -108,6 +120,7 @@ class ChannelManager {
       title: event.title,
       embedUrl: event.embedUrl,
       streamUrl: embedUrlChanged ? null : event.streamUrl || existing?.streamUrl || null,
+      streamMimeType: embedUrlChanged ? null : event.streamMimeType || existing?.streamMimeType || null,
       requestHeaders,
       sourceOptions: event.sourceOptions || existing?.sourceOptions || [],
       qualityOptions: event.qualityOptions || existing?.qualityOptions || [],
@@ -143,6 +156,7 @@ class ChannelManager {
           this.logger?.debug('Resolving stream for channel', { id: channel.id, embedUrl: channel.embedUrl });
           const result = await resolveStreamFromEmbed(channel.embedUrl, this.logger);
           channel.streamUrl = result.streamUrl;
+          channel.streamMimeType = result.streamMimeType || guessMimeTypeFromUrl(result.streamUrl);
           channel.requestHeaders = result.requestHeaders || channel.requestHeaders;
           channel.sourceOptions = result.sourceOptions?.length ? result.sourceOptions : channel.sourceOptions;
           channel.qualityOptions = result.qualityOptions?.length ? result.qualityOptions : channel.qualityOptions;
@@ -189,6 +203,7 @@ class ChannelManager {
     this.logger?.info(`Updated quality for ${channelId}`, { embedUrl });
     const result = await resolveStreamFromEmbed(embedUrl, this.logger);
     channel.streamUrl = result.streamUrl;
+    channel.streamMimeType = result.streamMimeType || guessMimeTypeFromUrl(result.streamUrl);
     channel.requestHeaders = result.requestHeaders || channel.requestHeaders;
     return channel;
   }
@@ -323,6 +338,43 @@ class ChannelManager {
     });
 
     return rewritten.join('\n');
+  }
+
+  rewriteLocalManifest(manifestBody, baseProxyUrl) {
+    const lines = manifestBody.split(/\r?\n/);
+    const rewritten = lines.map((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) return line;
+
+      return `${baseProxyUrl}/${encodeURIComponent(trimmed)}`;
+    });
+
+    return rewritten.join('\n');
+  }
+
+  isHlsChannel(channel) {
+    const mime = channel?.streamMimeType || '';
+    const url = channel?.streamUrl || '';
+    return /mpegurl/i.test(mime) || url.includes('.m3u8');
+  }
+
+  async ensureTransmuxed(channel) {
+    if (!channel?.streamUrl) return null;
+    const headers = this.buildStreamHeaders(channel);
+    const job = await this.transmuxer.ensureJob(channel.id, channel.streamUrl, headers);
+    this.transmuxJobs.set(channel.id, job);
+    this.logger?.info('Transmux job ready for channel', { channelId: channel.id, workDir: job.workDir });
+    return job;
+  }
+
+  getTransmuxJob(channelId) {
+    return this.transmuxer.getJob(channelId) || this.transmuxJobs.get(channelId) || null;
+  }
+
+  async cleanupTransmuxJobs(ids = []) {
+    if (!ids.length) return;
+    this.logger?.info('Evicting transmux jobs', { channelIds: ids });
+    await Promise.all(ids.map((id) => this.transmuxer.cleanupJob(id)));
   }
 }
 
