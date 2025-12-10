@@ -8,7 +8,7 @@ const ChannelManager = require('./channelManager');
 const { scrapeFrontPage } = require('./scraper');
 
 const PORT = process.env.PORT || 3005;
-const FRONT_PAGE_URL = process.env.FRONT_PAGE_URL || 'https://ntvstream.cx';
+const FRONT_PAGE_URL = process.env.FRONT_PAGE_URL || 'https://streamed.pk';
 const HYDRATION_CONCURRENCY = Number(process.env.HYDRATION_CONCURRENCY) || 5;
 
 const app = express();

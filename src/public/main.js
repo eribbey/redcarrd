@@ -56,7 +56,7 @@ function renderChannels() {
   const container = document.getElementById('channels');
   container.innerHTML = '';
   if (!state.channels.length) {
-    container.innerHTML = '<p class="muted">No channels built yet. Use rebuild to fetch from ntvstream.cx.</p>';
+    container.innerHTML = '<p class="muted">No channels built yet. Use rebuild to fetch from streamed.pk.</p>';
     return;
   }
 
