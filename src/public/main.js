@@ -68,15 +68,12 @@ function renderChannels() {
     node.querySelector('.channel-meta').textContent = channel.title;
 
     const sourceSelect = node.querySelector('.source');
-    const qualitySelect = node.querySelector('.quality');
     const previewLink = node.querySelector('.preview-link');
     const previewPlayer = node.querySelector('.preview-player');
 
     fillSelect(sourceSelect, channel.sourceOptions, channel.embedUrl);
-    fillSelect(qualitySelect, channel.qualityOptions, channel.embedUrl);
 
     sourceSelect.dataset.currentValue = channel.embedUrl;
-    qualitySelect.dataset.currentValue = channel.embedUrl;
 
     sourceSelect.addEventListener('change', async (e) => {
       const select = e.target;
@@ -95,29 +92,6 @@ function renderChannels() {
       } catch (error) {
         console.error('Failed to update channel source', error);
         showError('Unable to update channel source. Please try again.');
-        select.value = previousValue;
-      } finally {
-        select.disabled = false;
-      }
-    });
-
-    qualitySelect.addEventListener('change', async (e) => {
-      const select = e.target;
-      const previousValue = select.dataset.currentValue || select.value;
-      select.disabled = true;
-      try {
-        const res = await fetch(`/api/channel/${channel.id}/quality`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ embedUrl: select.value }),
-        });
-        if (!res.ok) throw new Error('Failed to update quality');
-        await fetchState();
-        select.dataset.currentValue = select.value;
-        clearError();
-      } catch (error) {
-        console.error('Failed to update channel quality', error);
-        showError('Unable to update channel quality. Please try again.');
         select.value = previousValue;
       } finally {
         select.disabled = false;
