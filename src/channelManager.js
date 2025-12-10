@@ -227,8 +227,7 @@ class ChannelManager {
   }
 
   generateEpg() {
-    const xml = create({ version: '1.0', encoding: 'UTF-8' })
-      .ele('tv');
+    const xml = create('tv', { version: '1.0', encoding: 'UTF-8' });
     this.channels.forEach((channel) => {
       xml
         .ele('channel', { id: channel.id })
