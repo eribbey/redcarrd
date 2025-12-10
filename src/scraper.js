@@ -301,7 +301,7 @@ async function fetchRenderedHtml(url, logger, options = {}) {
               const probablePlayerBundle = isProbablePlayerBundleScript(responseUrl, headers, body);
               const extractedStreams =
                 probablePlayerBundle || isLikelyJwPlayerBundle
-                  ? extractHlsStreamsFromSource(body)
+                  ? extractHlsStreamsFromSource(body, normalizedUrl)
                   : [];
 
               extractedStreams.forEach((url) => {
@@ -691,12 +691,31 @@ function collectOptions(root, selector, $ctx) {
     .filter(Boolean);
 }
 
-function normalizeStreamUrl(url) {
+function normalizeStreamUrl(url, baseUrl) {
   const trimmed = url?.trim();
   if (!trimmed) return null;
+  const fallbackBase = process.env.FRONT_PAGE_URL || 'https://streamed.pk';
+  const resolvedBase = baseUrl || fallbackBase;
+
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
-  if (trimmed.startsWith('//')) return `https:${trimmed}`;
-  return normalizeUrl(trimmed);
+
+  if (trimmed.startsWith('//')) {
+    try {
+      return new URL(trimmed, resolvedBase).toString();
+    } catch (error) {
+      return `https:${trimmed}`;
+    }
+  }
+
+  try {
+    if (/^[\w.-]+\.[a-z]{2,}/i.test(trimmed)) {
+      return new URL(`https://${trimmed.replace(/^\/\//, '')}`).toString();
+    }
+
+    return new URL(trimmed, resolvedBase).toString();
+  } catch (error) {
+    return normalizeUrl(trimmed);
+  }
 }
 
 function guessMimeTypeFromUrl(url = '') {
@@ -706,7 +725,7 @@ function guessMimeTypeFromUrl(url = '') {
   return '';
 }
 
-function extractHlsStreamsFromSource(source = '') {
+function extractHlsStreamsFromSource(source = '', baseUrl) {
   if (!source || typeof source !== 'string') return [];
 
   const candidates = new Set();
@@ -729,7 +748,7 @@ function extractHlsStreamsFromSource(source = '') {
       }
     })();
 
-    const normalized = normalizeStreamUrl(decoded);
+    const normalized = normalizeStreamUrl(decoded, baseUrl);
     if (normalized) candidates.add(normalized);
   };
 
@@ -797,11 +816,11 @@ function isProbablePlayerBundleScript(responseUrl = '', headers = {}, body = '')
   return isJavaScript && (urlSuggestsPlayer || headersSuggestPlayer || bodySuggestsPlayer);
 }
 
-function collectStreamCandidates($ctx, html = '') {
+function collectStreamCandidates($ctx, html = '', baseUrl) {
   const candidates = new Set();
 
   const add = (value) => {
-    const normalized = normalizeStreamUrl(value);
+    const normalized = normalizeStreamUrl(value, baseUrl);
     if (normalized) candidates.add(normalized);
   };
 
@@ -1060,9 +1079,10 @@ async function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) 
   return events;
 }
 
-function parseEmbedPage(payload, logger) {
+function parseEmbedPage(payload, logger, baseUrl) {
   const html = typeof payload === 'string' ? payload : payload?.html || '';
   const $ = cheerio.load(html);
+  const embedBase = baseUrl || payload?.url || payload?.pageUrl || payload?.responseUrl;
   const initialStream = $('iframe#streamIframe, iframe[id*="streamIframe"]').attr('src');
 
   const sourceOptions = collectOptions($('body'), '#sourceSelect option, select[name*="source"] option', $);
@@ -1074,14 +1094,18 @@ function parseEmbedPage(payload, logger) {
     return payload.discoveredStreams
       .map((entry) => {
         if (typeof entry === 'string') {
-          return { url: entry, mimeType: guessMimeTypeFromUrl(entry), isHls: entry.includes('.m3u8') };
+          const normalizedUrl = normalizeStreamUrl(entry, embedBase);
+          if (!normalizedUrl) return null;
+          return { url: normalizedUrl, mimeType: guessMimeTypeFromUrl(normalizedUrl), isHls: normalizedUrl.includes('.m3u8') };
         }
 
         if (entry && typeof entry === 'object' && entry.url) {
+          const normalizedUrl = normalizeStreamUrl(entry.url, embedBase);
+          if (!normalizedUrl) return null;
           return {
-            url: entry.url,
-            mimeType: entry.mimeType || guessMimeTypeFromUrl(entry.url),
-            isHls: Boolean(entry.isHls || entry.url.includes('.m3u8')),
+            url: normalizedUrl,
+            mimeType: entry.mimeType || guessMimeTypeFromUrl(normalizedUrl),
+            isHls: Boolean(entry.isHls || normalizedUrl.includes('.m3u8')),
           };
         }
 
@@ -1092,11 +1116,12 @@ function parseEmbedPage(payload, logger) {
 
   const discoveredStreams = normalizeDiscoveredStreams();
   const directStreams = Array.from(
-    new Set([...discoveredStreams.map((entry) => entry.url), ...collectStreamCandidates($, html)]),
+    new Set([...discoveredStreams.map((entry) => entry.url), ...collectStreamCandidates($, html, embedBase)]),
   );
+  const normalizedInitial = normalizeStreamUrl(initialStream, embedBase);
   const streamUrl =
     directStreams.find((url) => url.includes('.m3u8')) ||
-    normalizeStreamUrl(initialStream) ||
+    normalizedInitial ||
     directStreams[0] ||
     null;
 
@@ -1121,7 +1146,7 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
       ? await fetchRenderedHtml(normalizedUrl, logger, { captureStreams: true, waitForMatches: false })
       : await fetchHtml(normalizedUrl, logger);
 
-    const parsed = parseEmbedPage(payload, logger);
+    const parsed = parseEmbedPage(payload, logger, normalizedUrl);
 
     if (useRenderer) {
       const discoveredStreams = Array.isArray(payload?.discoveredStreams) ? payload.discoveredStreams : [];
@@ -1149,7 +1174,7 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
           cookieHeader: payload?.cookieHeader,
           acceptLanguage: 'en-US,en;q=0.9',
         });
-        const fallbackParsed = parseEmbedPage(html, logger);
+        const fallbackParsed = parseEmbedPage(html, logger, normalizedUrl);
         return { ...fallbackParsed, requestHeaders: buildDefaultStreamHeaders(normalizedUrl) };
       }
     }
@@ -1165,7 +1190,7 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
         cookieHeader: error?.cookieHeader,
         acceptLanguage: 'en-US,en;q=0.9',
       });
-      const parsed = parseEmbedPage(html, logger);
+      const parsed = parseEmbedPage(html, logger, normalizedUrl);
       return { ...parsed, requestHeaders: buildDefaultStreamHeaders(normalizedUrl) };
     }
 
