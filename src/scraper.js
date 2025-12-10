@@ -3,6 +3,7 @@ const cheerio = require('cheerio');
 const dayjs = require('dayjs');
 const { chromium } = require('playwright');
 const fs = require('fs');
+const https = require('https');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
 
@@ -27,7 +28,7 @@ function normalizeUrl(url = '') {
   const trimmed = url.trim();
   if (!trimmed) return '';
 
-  const baseUrl = process.env.FRONT_PAGE_URL || 'https://ntvstream.cx';
+  const baseUrl = process.env.FRONT_PAGE_URL || 'https://streamed.pk';
 
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   if (trimmed.startsWith('//')) return `https:${trimmed}`;
@@ -624,7 +625,7 @@ function normalizeOnclickTarget(onclickUrl) {
   const trimmed = onclickUrl.trim();
   if (/^https?:\/\//i.test(trimmed)) return normalizeUrl(trimmed);
   const path = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
-  return normalizeUrl(`ntvstream.cx${path}`);
+  return normalizeUrl(`streamed.pk${path}`);
 }
 
 async function resolveEmbedFromOnclick(onclickValue, logger) {
@@ -1121,35 +1122,136 @@ async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
   }
 }
 
+async function fetchMatchesFromApi(baseUrl, endpoint = 'live', logger) {
+  const normalizedBase = normalizeUrl(baseUrl || 'https://streamed.pk') || 'https://streamed.pk';
+  const url = `${normalizedBase.replace(/\/$/, '')}/api/matches/${endpoint}`;
+
+  const response = await axios.get(url, {
+    httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+    headers: { 'User-Agent': 'redcarrd-scraper/1.0' },
+    proxy: false,
+  });
+
+  const matches = Array.isArray(response.data) ? response.data : [];
+  logger?.info('Fetched matches from API', { endpoint, count: matches.length, url });
+  return matches;
+}
+
+async function fetchStreamsForSource(baseUrl, sourceName, sourceId, logger) {
+  if (!sourceName || !sourceId) return [];
+
+  const normalizedBase = normalizeUrl(baseUrl || 'https://streamed.pk') || 'https://streamed.pk';
+  const url = `${normalizedBase.replace(/\/$/, '')}/api/stream/${sourceName}/${sourceId}`;
+
+  const response = await axios.get(url, {
+    httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+    headers: { 'User-Agent': 'redcarrd-scraper/1.0' },
+    proxy: false,
+  });
+
+  const streams = Array.isArray(response.data) ? response.data : [];
+  logger?.debug('Fetched stream list', { sourceName, sourceId, count: streams.length });
+  return streams;
+}
+
+function buildEventsFromApi(matches = [], baseUrl, timezoneName = 'UTC', logger) {
+  if (!Array.isArray(matches)) return [];
+
+  const events = [];
+  const now = dayjs();
+
+  matches.forEach((match) => {
+    const adminSource = (match?.sources || []).find(
+      (source) => source?.source?.toLowerCase?.() === 'admin' && source?.id,
+    );
+
+    if (!adminSource) return;
+
+    const title =
+      match?.title ||
+      [match?.teams?.home?.name, match?.teams?.away?.name].filter(Boolean).join(' vs ') ||
+      adminSource.id;
+
+    const category = (match?.category || 'general').toString().toLowerCase();
+    const startTime = match?.date ? dayjs(match.date).tz(timezoneName).toDate() : now.toDate();
+
+    events.push({
+      title,
+      category,
+      embedUrl: null,
+      adminSource,
+      startTime,
+      baseUrl,
+    });
+  });
+
+  logger?.info('Built preliminary events from API payload', { count: events.length });
+  return events;
+}
+
 async function scrapeFrontPage(frontPageUrl, timezoneName = 'UTC', logger) {
-  const useRenderer = process.env.SCRAPER_RENDER_WITH_JS !== 'false';
-  const normalizedUrl = normalizeUrl(frontPageUrl);
+  const normalizedUrl = normalizeUrl(frontPageUrl || 'https://streamed.pk');
+
   try {
-    const rendered = useRenderer
-      ? await fetchRenderedHtml(normalizedUrl, logger, { capturePageData: true })
-      : await fetchHtml(normalizedUrl, logger);
+    const matches = await fetchMatchesFromApi(normalizedUrl, 'live', logger);
+    const preliminary = buildEventsFromApi(matches, normalizedUrl, timezoneName, logger);
+    const hydrated = [];
 
-    const html = typeof rendered === 'string' ? rendered : rendered?.html;
-    let events = await parseFrontPage(html, timezoneName, logger, { url: normalizedUrl });
+    for (const event of preliminary) {
+      const { adminSource } = event;
+      try {
+        const streams = await fetchStreamsForSource(normalizedUrl, adminSource.source, adminSource.id, logger);
+        if (!streams.length) continue;
 
-    if (!events.length && rendered && typeof rendered === 'object') {
-      events = buildEventsFromMatchesPayload(rendered.pageData, timezoneName, logger, { url: normalizedUrl });
+        const sortedStreams = streams.slice().sort((a, b) => {
+          if (a.hd === b.hd) return (b.viewers || 0) - (a.viewers || 0);
+          return a.hd ? -1 : 1;
+        });
+
+        const streamOptions = sortedStreams
+          .map((stream) => ({
+            label: `Admin ${stream.streamNo || 1}${stream.hd ? ' (HD)' : ''}${
+              stream.language ? ` ${stream.language}` : ''
+            }`,
+            embedUrl: normalizeUrl(stream.embedUrl),
+            requestHeaders: buildDefaultStreamHeaders(stream.embedUrl),
+          }))
+          .filter((opt) => opt.embedUrl);
+
+        if (!streamOptions.length) continue;
+
+        const primary = streamOptions[0];
+
+        hydrated.push({
+          title: event.title,
+          category: event.category,
+          embedUrl: primary.embedUrl,
+          streamUrl: null,
+          sourceOptions: streamOptions,
+          qualityOptions: streamOptions,
+          startTime: event.startTime,
+          requestHeaders: primary.requestHeaders,
+        });
+      } catch (error) {
+        logger?.warn('Failed to fetch admin streams for match', {
+          source: adminSource?.source,
+          id: adminSource?.id,
+          error: error.message,
+        });
+      }
     }
 
-    return events;
+    if (!hydrated.length) {
+      logger?.warn('No events built from streamed.pk live API');
+    }
+
+    return hydrated;
   } catch (error) {
-    logger?.error('Failed to fetch front page', { url: normalizedUrl, timezoneName, error: error.message });
-
-    if (useRenderer) {
-      logger?.warn('Falling back to non-rendered front page fetch', { url: normalizedUrl });
-      const html = await fetchHtml(normalizedUrl, logger, {
-        cookies: error?.cookies,
-        cookieHeader: error?.cookieHeader,
-        acceptLanguage: 'en-US,en;q=0.9',
-      });
-      return parseFrontPage(html, timezoneName, logger, { url: normalizedUrl });
-    }
-
+    logger?.error('Failed to fetch events from streamed.pk API', {
+      url: normalizedUrl,
+      timezoneName,
+      error: error.message,
+    });
     throw error;
   }
 }
@@ -1175,4 +1277,7 @@ module.exports = {
   createProgrammeFromEvent,
   buildDefaultStreamHeaders,
   extractHlsStreamsFromJwPlayerBundle,
+  buildEventsFromApi,
+  fetchMatchesFromApi,
+  fetchStreamsForSource,
 };

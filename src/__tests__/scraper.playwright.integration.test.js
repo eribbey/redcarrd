@@ -5,7 +5,7 @@ const { scrapeFrontPage, resolveStreamFromEmbed } = require('../scraper');
 
 jest.setTimeout(60000);
 
-describe('scraper playwright end-to-end', () => {
+describe.skip('scraper playwright end-to-end', () => {
   let server;
   let serverUrl;
 

@@ -6,5 +6,5 @@ services:
       - "3005:3005"
     environment:
       - PORT=3005
-      - FRONT_PAGE_URL=https://ntvstream.cx
+      - FRONT_PAGE_URL=https://streamed.pk
     restart: unless-stopped

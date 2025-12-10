@@ -5,59 +5,27 @@ const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
 const {
-  parseFrontPage,
   parseEmbedPage,
   resolveStreamFromEmbed,
   createProgrammeFromEvent,
   extractHlsStreamsFromJwPlayerBundle,
+  scrapeFrontPage,
+  buildEventsFromApi,
 } = require('../scraper');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-const frontPageHtml = `
-<div class="match-card" data-category="football" onclick="openMatch('https://ntvstream.cx/embed?a')">
-  <div class="match-title">Match A</div>
-  <span class="live-badge">Live</span>
-  <select id="sourceSelect">
-    <option value="https://ntvstream.cx/embed?a">Source A</option>
-    <option value="https://ntvstream.cx/embed?b">Source B</option>
-  </select>
-  <select id="qualitySelect">
-    <option value="https://ntvstream.cx/embed?a&quality=720">720p</option>
-    <option value="https://ntvstream.cx/embed?a&quality=480">480p</option>
-  </select>
-</div>
-<div class="match-card" data-category="basketball" onclick="openMatch('https://ntvstream.cx/embed?c')">
-  <div class="match-title">Match B</div>
-  <span class="live-badge">Live</span>
-  <span class="time-badge">10:00</span>
-</div>
-`;
-
 const embedHtml = `
 <div>
   <iframe id="streamIframe" src="https://cdn.example.com/stream.m3u8"></iframe>
   <select id="sourceSelect">
-    <option value="https://ntvstream.cx/embed?a">Primary</option>
+    <option value="https://streamed.pk/embed?a">Primary</option>
   </select>
   <select id="qualitySelect">
-    <option value="https://ntvstream.cx/embed?a&quality=1080">1080p</option>
-    <option value="https://ntvstream.cx/embed?a&quality=720">720p</option>
+    <option value="https://streamed.pk/embed?a&quality=1080">1080p</option>
+    <option value="https://streamed.pk/embed?a&quality=720">720p</option>
   </select>
-</div>
-`;
-
-const matchesContentHtml = `
-<div id="matchesContent">
-  <div class="match-card" data-category="football" onclick="watchMatch('https://ntvstream.cx/embed?d')">
-    <div class="match-title">Team A vs Team B</div>
-    <span class="live-badge">Live</span>
-    <span class="time-badge">13:30</span>
-    <select id="sourceSelect">
-      <option value="https://ntvstream.cx/embed?d">Main</option>
-    </select>
-  </div>
 </div>
 `;
 
@@ -71,16 +39,68 @@ const embedHtmlWithOnclickOptions = `
 `;
 
 describe('scraper helpers', () => {
-  test('parses front page events', async () => {
-    nock('https://ntvstream.cx')
-      .get('/embed?c')
-      .reply(200, '<iframe id="streamPlayer" src="https://ntvstream.cx/embed?c"></iframe>');
+  test('buildEventsFromApi filters to admin streams and maps start time', () => {
+    const timezoneName = 'UTC';
+    const matches = [
+      {
+        title: 'Admin Match',
+        category: 'soccer',
+        date: 1736420400000,
+        sources: [
+          { source: 'admin', id: 'admin-1' },
+          { source: 'bravo', id: 'other' },
+        ],
+      },
+      {
+        title: 'Non Admin Match',
+        category: 'hockey',
+        sources: [{ source: 'echo', id: 'other' }],
+      },
+    ];
 
-    const events = await parseFrontPage(frontPageHtml);
-    expect(events).toHaveLength(2);
-    expect(events[0]).toMatchObject({ category: 'football', title: 'Match A' });
-    expect(events[0].sourceOptions).toHaveLength(2);
-    expect(events[0].qualityOptions).toHaveLength(2);
+    const events = buildEventsFromApi(matches, 'https://streamed.pk', timezoneName);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ category: 'soccer', title: 'Admin Match' });
+    expect(events[0].adminSource).toMatchObject({ source: 'admin', id: 'admin-1' });
+    expect(events[0].startTime).toBeInstanceOf(Date);
+  });
+
+  test('scrapeFrontPage builds hydrated events from streamed.pk APIs', async () => {
+    const liveMatches = [
+      {
+        title: 'API Match',
+        category: 'basketball',
+        date: 1736420400000,
+        sources: [
+          { source: 'admin', id: 'api-match-1' },
+          { source: 'charlie', id: 'api-match-1' },
+        ],
+      },
+    ];
+
+    const adminStreams = [
+      {
+        id: 'api-match-1',
+        streamNo: 1,
+        language: 'English',
+        hd: true,
+        embedUrl: 'https://embedsports.top/embed/admin/api-match-1/1',
+        source: 'admin',
+      },
+    ];
+
+    nock('https://streamed.pk').get('/api/matches/live').reply(200, liveMatches);
+    nock('https://streamed.pk').get('/api/stream/admin/api-match-1').reply(200, adminStreams);
+
+    const events = await scrapeFrontPage('https://streamed.pk', 'UTC');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      title: 'API Match',
+      category: 'basketball',
+      embedUrl: 'https://embedsports.top/embed/admin/api-match-1/1',
+    });
+    expect(events[0].sourceOptions).toHaveLength(1);
+    expect(events[0].qualityOptions[0].label).toContain('Admin');
   });
 
   test('parses embed page', () => {
@@ -95,42 +115,9 @@ describe('scraper helpers', () => {
     expect(result.sourceOptions.map((opt) => opt.embedUrl)).toEqual(['/embed/stream1', '/embed/stream2']);
   });
 
-  test('parses matchesContent events and extracts scheduled time', async () => {
-    const timezoneName = 'Europe/London';
-    const events = await parseFrontPage(matchesContentHtml, timezoneName);
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
-      category: 'football',
-      title: 'Team A vs Team B',
-      embedUrl: 'https://ntvstream.cx/embed?d',
-    });
-    expect(events[0].sourceOptions).toHaveLength(1);
-    expect(events[0].startTime).toBeInstanceOf(Date);
-    const eventTime = dayjs(events[0].startTime).tz(timezoneName);
-    expect(eventTime.hour()).toBe(13);
-    expect(eventTime.minute()).toBe(30);
-  });
-
-  test('fetches embedUrl from onclick target when no embed is present on the card', async () => {
-    const onclickOnlyHtml = `
-    <div class="match-card" data-category="football" onclick="openMatch('/embedded/xyz')">
-      <div class="match-title">Onclick Only</div>
-      <span class="live-badge">Live</span>
-    </div>`;
-
-    nock('https://ntvstream.cx').get('/embedded/xyz').reply(
-      200,
-      '<iframe id="streamPlayer" src="https://ntvstream.cx/embed/xyz"></iframe>',
-    );
-
-    const events = await parseFrontPage(onclickOnlyHtml, 'UTC');
-    expect(events).toHaveLength(1);
-    expect(events[0].embedUrl).toBe('https://ntvstream.cx/embed/xyz');
-  });
-
   test('resolves stream from embed via HTTP', async () => {
-    nock('https://ntvstream.cx').get('/embed?a').reply(200, embedHtml);
-    const result = await resolveStreamFromEmbed('https://ntvstream.cx/embed?a');
+    nock('https://streamed.pk').get('/embed?a').reply(200, embedHtml);
+    const result = await resolveStreamFromEmbed('https://streamed.pk/embed?a');
     expect(result.streamUrl).toContain('stream.m3u8');
   });
 
@@ -164,7 +151,7 @@ describe('scraper helpers', () => {
 
     expect(streams).toEqual([
       'https://cdn.example.com/live/alpha.m3u8',
-      'https://ntvstream.cx/beta/stream.m3u8',
+      'https://streamed.pk/beta/stream.m3u8',
     ]);
   });
 });
