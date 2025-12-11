@@ -5,20 +5,14 @@ const { create } = require('xmlbuilder');
 const axios = require('axios');
 const crypto = require('crypto');
 const https = require('https');
-const { resolveStreamFromEmbed, createProgrammeFromEvent, buildDefaultStreamHeaders } = require('./scraper');
+const { createProgrammeFromEvent, buildDefaultStreamHeaders } = require('./scraper');
 const Transmuxer = require('./transmuxer');
+const Restreamer = require('./restreamer');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
 const DEFAULT_HYDRATION_CONCURRENCY = 5;
-
-function guessMimeTypeFromUrl(url = '') {
-  if (/\.m3u8(\?|$)/i.test(url)) return 'application/vnd.apple.mpegurl';
-  if (/\.mpd(\?|$)/i.test(url)) return 'application/dash+xml';
-  if (/\.(mp4|m4s)(\?|$)/i.test(url)) return 'video/mp4';
-  return '';
-}
 
 class ChannelManager {
   constructor({
@@ -39,6 +33,8 @@ class ChannelManager {
     this.hydrationInProgress = false;
     this.transmuxer = new Transmuxer({ logger });
     this.transmuxJobs = new Map();
+    this.restreamer = new Restreamer({ logger });
+    this.restreamJobs = new Map();
   }
 
   async buildChannels(events, selectedCategories = []) {
@@ -87,7 +83,9 @@ class ChannelManager {
     this.programmes = programmes;
     this.playlistReady = false;
     this.hydrationInProgress = false;
-    this.cleanupTransmuxJobs(removedChannels.map((channel) => channel.id));
+    const removedIds = removedChannels.map((channel) => channel.id);
+    this.cleanupTransmuxJobs(removedIds);
+    this.cleanupRestreamJobs(removedIds);
 
     this.logger?.info('Reconciling channels', {
       selectedCategories,
@@ -128,6 +126,7 @@ class ChannelManager {
       selectedSource: event.sourceOptions?.length
         ? { source: event.sourceOptions[0].source, sourceId: event.sourceOptions[0].sourceId }
         : existing?.selectedSource || null,
+      streamMode: existing?.streamMode || 'restream',
       expiresAt,
     };
   }
@@ -153,18 +152,18 @@ class ChannelManager {
         if (!channel) break;
 
         try {
-          this.logger?.debug('Resolving stream for channel', { id: channel.id, embedUrl: channel.embedUrl });
-          const result = await resolveStreamFromEmbed(channel.embedUrl, this.logger);
-          channel.streamUrl = result.streamUrl;
-          channel.streamMimeType = result.streamMimeType || guessMimeTypeFromUrl(result.streamUrl);
-          channel.requestHeaders = result.requestHeaders || channel.requestHeaders;
-          if (result.cookies?.length) channel.cookies = result.cookies;
-          if (result.setCookieHeaders?.length) this.updateCookies(channel, result.setCookieHeaders);
-          channel.sourceOptions = result.sourceOptions?.length ? result.sourceOptions : channel.sourceOptions;
-          channel.qualityOptions = result.qualityOptions?.length ? result.qualityOptions : channel.qualityOptions;
-          this.logger?.info(`Resolved stream for channel ${channel.id}`, { streamUrl: channel.streamUrl });
+          this.logger?.debug('Restreaming embed for channel', { id: channel.id, embedUrl: channel.embedUrl });
+          const job = await this.ensureRestreamed(channel);
+          if (job) {
+            channel.streamUrl = job.manifestPath;
+            channel.streamMimeType = 'application/vnd.apple.mpegurl';
+            channel.streamMode = 'restream';
+            this.logger?.info(`Restream ready for channel ${channel.id}`, { manifestPath: job.manifestPath });
+          } else {
+            this.logger?.warn('Restream job could not be created', { id: channel.id });
+          }
         } catch (error) {
-          this.logger?.warn(`Failed to resolve stream for ${channel.id}`, { error: error.message });
+          this.logger?.warn(`Failed to restream embed for ${channel.id}`, { error: error.message });
         }
       }
     };
@@ -187,6 +186,7 @@ class ChannelManager {
       ? { source: selectedOption.source, sourceId: selectedOption.sourceId }
       : channel.selectedSource;
     channel.cookies = [];
+    channel.streamMode = 'restream';
     this.playlistReady = false;
     this.hydrationInProgress = false;
     this.logger?.info(`Updated source for ${channelId}`, { embedUrl });
@@ -200,15 +200,10 @@ class ChannelManager {
     channel.streamUrl = null;
     channel.requestHeaders = buildDefaultStreamHeaders(embedUrl);
     channel.cookies = [];
+    channel.streamMode = 'restream';
     this.playlistReady = false;
     this.hydrationInProgress = false;
     this.logger?.info(`Updated quality for ${channelId}`, { embedUrl });
-    const result = await resolveStreamFromEmbed(embedUrl, this.logger);
-    channel.streamUrl = result.streamUrl;
-    channel.streamMimeType = result.streamMimeType || guessMimeTypeFromUrl(result.streamUrl);
-    channel.requestHeaders = result.requestHeaders || channel.requestHeaders;
-    if (result.cookies?.length) channel.cookies = result.cookies;
-    if (result.setCookieHeaders?.length) this.updateCookies(channel, result.setCookieHeaders);
     return channel;
   }
 
@@ -361,6 +356,10 @@ class ChannelManager {
     return /mpegurl/i.test(mime) || url.includes('.m3u8');
   }
 
+  isRestreamChannel(channel) {
+    return channel?.streamMode === 'restream';
+  }
+
   async ensureTransmuxed(channel) {
     if (!channel?.streamUrl) return null;
     const headers = this.buildStreamHeaders(channel);
@@ -370,14 +369,39 @@ class ChannelManager {
     return job;
   }
 
+  async ensureRestreamed(channel) {
+    if (!channel?.embedUrl) return null;
+    const existing = this.restreamer.getJob(channel.id);
+    if (existing && existing.embedUrl !== channel.embedUrl) {
+      await this.restreamer.cleanupJob(channel.id);
+      this.restreamJobs.delete(channel.id);
+    }
+
+    const job = await this.restreamer.ensureJob(channel.id, channel.embedUrl);
+    if (job) this.restreamJobs.set(channel.id, job);
+    return job;
+  }
+
   getTransmuxJob(channelId) {
-    return this.transmuxer.getJob(channelId) || this.transmuxJobs.get(channelId) || null;
+    return (
+      this.transmuxer.getJob(channelId) ||
+      this.transmuxJobs.get(channelId) ||
+      this.restreamer.getJob(channelId) ||
+      this.restreamJobs.get(channelId) ||
+      null
+    );
   }
 
   async cleanupTransmuxJobs(ids = []) {
     if (!ids.length) return;
     this.logger?.info('Evicting transmux jobs', { channelIds: ids });
     await Promise.all(ids.map((id) => this.transmuxer.cleanupJob(id)));
+  }
+
+  async cleanupRestreamJobs(ids = []) {
+    if (!ids.length) return;
+    this.logger?.info('Evicting restream jobs', { channelIds: ids });
+    await Promise.all(ids.map((id) => this.restreamer.cleanupJob(id)));
   }
 }
 

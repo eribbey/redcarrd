@@ -217,10 +217,32 @@ async function serveTransmuxedManifest(req, res, channel) {
   }
 }
 
+async function serveRestreamedManifest(req, res, channel) {
+  try {
+    const job = await channelManager.ensureRestreamed(channel);
+    const manifestBody = await fs.promises.readFile(job.manifestPath, 'utf8');
+    const base = `${req.protocol}://${req.get('host')}/hls/${encodeURIComponent(channel.id)}/local`;
+    const rewritten = channelManager.rewriteLocalManifest(manifestBody, base);
+    res.set('Content-Type', 'application/vnd.apple.mpegurl');
+    return res.send(rewritten);
+  } catch (error) {
+    logger.error('Failed to serve restreamed manifest', {
+      channelId: channel?.id,
+      targetUrl: channel?.embedUrl,
+      message: error.message,
+    });
+    return res.status(502).send('Failed to restream embed');
+  }
+}
+
 app.get('/hls/:id', async (req, res) => {
   const channel = channelManager.getChannelById(req.params.id);
   if (!channel || !channel.streamUrl) {
     return res.status(404).send('Channel not found or stream unavailable');
+  }
+
+  if (channelManager.isRestreamChannel(channel)) {
+    return serveRestreamedManifest(req, res, channel);
   }
 
   if (channelManager.isHlsChannel(channel)) {
@@ -238,6 +260,10 @@ app.get('/hls/:id/proxy', async (req, res) => {
     return res.status(404).send('Channel not found or stream unavailable');
   }
 
+  if (channelManager.isRestreamChannel(channel)) {
+    return res.status(400).send('Channel is being restreamed; direct proxy not available');
+  }
+
   if (!channelManager.isHlsChannel(channel)) {
     return res.status(400).send('Channel is being transmuxed; direct proxy not available');
   }
@@ -251,7 +277,7 @@ app.get('/hls/:id/proxy', async (req, res) => {
 
 app.get('/hls/:id/local/:segment', async (req, res) => {
   const channel = channelManager.getChannelById(req.params.id);
-  if (!channel || channelManager.isHlsChannel(channel)) {
+  if (!channel || (channelManager.isHlsChannel(channel) && !channelManager.isRestreamChannel(channel))) {
     return res.status(404).send('Channel not found or not transmuxed');
   }
 
