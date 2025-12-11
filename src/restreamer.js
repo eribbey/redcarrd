@@ -4,7 +4,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 class Restreamer {
-  constructor({ logger, scriptPath = path.join(__dirname, 'restream.js'), readinessTimeoutMs = 60000 }) {
+  constructor({ logger, scriptPath = path.join(__dirname, 'restream.js'), readinessTimeoutMs = 120000 }) {
     this.logger = logger;
     this.scriptPath = scriptPath;
     this.readinessTimeoutMs = readinessTimeoutMs;
@@ -36,7 +36,7 @@ class Restreamer {
       this.logger?.warn('Restream stderr', { channelId, message: data.toString() });
     });
 
-    const readyPromise = this.waitForManifest(manifestPath, this.readinessTimeoutMs);
+    const readyPromise = this.waitForManifest(manifestPath, this.readinessTimeoutMs, child);
 
     const completion = new Promise((resolve) => {
       child.on('exit', (code, signal) => {
@@ -48,7 +48,18 @@ class Restreamer {
       });
     });
 
-    await readyPromise;
+    try {
+      await readyPromise;
+    } catch (error) {
+      this.logger?.error('Failed to start restream job', { channelId, error: error.message });
+
+      if (child && !child.killed) {
+        child.kill('SIGTERM');
+      }
+
+      await new Promise((resolve) => child.once('exit', resolve));
+      throw error;
+    }
 
     const job = {
       channelId,
@@ -65,20 +76,57 @@ class Restreamer {
     return job;
   }
 
-  async waitForManifest(manifestPath, timeoutMs) {
-    const start = Date.now();
+  async waitForManifest(manifestPath, timeoutMs, child) {
+    return new Promise((resolve, reject) => {
+      const start = Date.now();
+      let timer;
 
-    while (Date.now() - start < timeoutMs) {
-      try {
-        const stats = await fs.promises.stat(manifestPath);
-        if (stats.size > 0) return true;
-      } catch (error) {
-        // ignore until timeout
+      const onExit = (code, signal) => {
+        cleanup();
+        reject(new Error(`Restream process exited before manifest was ready (code=${code}, signal=${signal})`));
+      };
+
+      const onError = (error) => {
+        cleanup();
+        reject(error);
+      };
+
+      if (child) {
+        child.once('exit', onExit);
+        child.once('error', onError);
       }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
 
-    throw new Error(`Timed out waiting for restream manifest at ${manifestPath}`);
+      const poll = async () => {
+        try {
+          const stats = await fs.promises.stat(manifestPath);
+          if (stats.size > 0) {
+            cleanup();
+            resolve(true);
+            return;
+          }
+        } catch (error) {
+          // ignore until timeout
+        }
+
+        if (Date.now() - start >= timeoutMs) {
+          cleanup();
+          reject(new Error(`Timed out waiting for restream manifest at ${manifestPath}`));
+          return;
+        }
+
+        timer = setTimeout(poll, 500);
+      };
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        if (child) {
+          child.off('exit', onExit);
+          child.off('error', onError);
+        }
+      };
+
+      poll();
+    });
   }
 
   getJob(channelId) {
