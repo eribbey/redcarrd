@@ -77,12 +77,12 @@ async function main() {
     });
 
     // Promise that resolves when we see a .m3u8 request
-    const hlsUrlPromise = waitForHlsUrl(page, 45000);
+    const hlsUrlPromise = waitForHlsUrl(page, 90000);
 
     console.log('[+] Navigating to page…');
     await page.goto(pageUrl, {
       waitUntil: 'domcontentloaded',
-      timeout: 60000
+      timeout: 90000
     });
 
     console.log('[+] Trying to start playback…');
