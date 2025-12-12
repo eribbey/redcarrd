@@ -6,11 +6,13 @@ const state = {
   pendingLogs: 0,
   playlistReady: false,
   hydrating: false,
+  logLevelFilter: 'all',
 };
 
 const logKeys = new Set();
 let logStream = null;
 const previewPlayers = new WeakMap();
+const logLevelRank = { debug: 0, info: 1, warn: 2, error: 3 };
 
 function showError(message) {
   const banner = document.getElementById('errorBanner');
@@ -203,6 +205,7 @@ function loadPreview(videoEl, url) {
 function renderLogs() {
   if (state.logsPaused) return;
   const logs = state.logs
+    .filter((l) => shouldDisplayLog(l))
     .map((l) => {
       const metaText = l.meta && Object.keys(l.meta || {}).length ? ` ${JSON.stringify(l.meta)}` : '';
       return `[${l.timestamp}] [${l.level.toUpperCase()}] ${l.message}${metaText}`;
@@ -245,6 +248,14 @@ function syncLogs(entries = []) {
     .reverse()
     .forEach((entry) => addLogEntry(entry, { render: false }));
   renderLogs();
+}
+
+function shouldDisplayLog(entry) {
+  if (!entry) return false;
+  if (state.logLevelFilter === 'all') return true;
+  const entryRank = logLevelRank[entry.level] ?? Number.POSITIVE_INFINITY;
+  const threshold = logLevelRank[state.logLevelFilter] ?? 0;
+  return entryRank >= threshold;
 }
 
 function updateLogStatus() {
@@ -357,6 +368,10 @@ document.getElementById('epgBtn').addEventListener('click', () => {
   window.open('/epg.xml', '_blank', 'noopener');
 });
 document.getElementById('toggleLogs').addEventListener('click', toggleLogs);
+document.getElementById('logLevelFilter').addEventListener('change', (event) => {
+  state.logLevelFilter = event.target.value;
+  renderLogs();
+});
 
 fetchState();
 startLogStream();
