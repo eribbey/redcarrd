@@ -119,11 +119,11 @@ async function main() {
     });
 
     const maxDetectionAttempts = 2;
-    let hlsUrl = null;
+    let streamInfo = null;
     let lastDetectionError = null;
 
     for (let attempt = 1; attempt <= maxDetectionAttempts; attempt += 1) {
-      const hlsUrlPromise = waitForHlsUrl(page, 90000);
+      const streamUrlPromise = waitForHlsUrl(page, 90000);
 
       if (attempt > 1) {
         console.warn(`[!] Retrying playback/HLS detection (attempt ${attempt}/${maxDetectionAttempts})…`);
@@ -133,22 +133,22 @@ async function main() {
       console.log('[+] Trying to start playback…');
       await autoplayVideo(page);
 
-      console.log('[+] Waiting for underlying HLS (.m3u8) URL…');
+      console.log('[+] Waiting for underlying stream manifest (HLS/DASH)…');
       try {
-        hlsUrl = await hlsUrlPromise;
+        streamInfo = await streamUrlPromise;
         break;
       } catch (error) {
         lastDetectionError = error;
       }
     }
 
-    if (!hlsUrl) {
-      throw lastDetectionError || new Error('Failed to detect .m3u8 URL');
+    if (!streamInfo) {
+      throw lastDetectionError || new Error('Failed to detect HLS/DASH URL');
     }
-    console.log(`[+] Detected source HLS URL: ${hlsUrl}`);
+    console.log(`[+] Detected source stream (${streamInfo.type}): ${streamInfo.url}`);
 
     // Collect user-agent and cookies to help ffmpeg mimic the browser
-    const cookies = await context.cookies(hlsUrl).catch(() => []);
+    const cookies = await context.cookies(streamInfo.url).catch(() => []);
     const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
 
     const headerLines = [];
@@ -162,6 +162,8 @@ async function main() {
     console.log('[+] Starting ffmpeg HLS restream…');
     console.log(`[+] Output playlist: ${outPlaylist}`);
 
+    const isDash = streamInfo.type === 'dash';
+
     const ffmpegArgs = [
       '-loglevel', 'warning',
       '-fflags', '+genpts',
@@ -170,8 +172,10 @@ async function main() {
       // Browser-like headers
       '-headers', headersArg,
       '-user_agent', userAgent,
+      // DASH manifests sometimes require explicit protocol allowlisting
+      ...(isDash ? ['-protocol_whitelist', 'file,http,https,tcp,tls'] : []),
       // Input
-      '-i', hlsUrl,
+      ...(isDash ? ['-i', streamInfo.url, '-map', '0'] : ['-i', streamInfo.url]),
       // Copy codecs (no re-encode); change to -c:v libx264 -c:a aac if transcoding needed
       '-c', 'copy',
       // HLS output options
@@ -238,30 +242,35 @@ async function main() {
 }
 
 /**
- * Resolve with first .m3u8 URL seen in network requests.
+ * Resolve with first streaming URL seen in network requests.
+ * Supports HLS (.m3u8), DASH (.mpd), and progressive MP4 as a fallback.
  */
 function waitForHlsUrl(page, timeoutMs = 30000) {
   return new Promise((resolve, reject) => {
     let done = false;
 
-    function finish(err, url) {
+    function finish(err, info) {
       if (done) return;
       done = true;
       page.removeListener('request', onRequest);
       clearTimeout(timer);
       if (err) return reject(err);
-      resolve(url);
+      resolve(info);
     }
 
     const timer = setTimeout(() => {
-      finish(new Error('Timed out waiting for .m3u8 URL'));
+      finish(new Error('Timed out waiting for stream URL'));
     }, timeoutMs);
 
     function onRequest(request) {
       try {
         const url = request.url();
         if (/\.m3u8(\?|$)/i.test(url)) {
-          finish(null, url);
+          finish(null, { type: 'hls', url });
+        } else if (/\.mpd(\?|$)/i.test(url)) {
+          finish(null, { type: 'dash', url });
+        } else if (/\.(mp4)(\?|$)/i.test(url)) {
+          finish(null, { type: 'progressive', url });
         }
       } catch (e) {
         // ignore
