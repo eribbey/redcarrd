@@ -83,22 +83,50 @@ class Restreamer {
     return new Promise((resolve, reject) => {
       const start = Date.now();
       let timer;
+      let stdoutBuffer = '';
+      let stderrBuffer = '';
+
+      const appendWithLimit = (existing, chunk, limit = 8000) => {
+        const next = `${existing}${chunk}`;
+        return next.length > limit ? next.slice(next.length - limit) : next;
+      };
 
       this.logger?.debug('Waiting for restream manifest', { manifestPath, timeoutMs, channelId });
 
       const onExit = (code, signal) => {
         cleanup();
-        reject(new Error(`Restream process exited before manifest was ready (code=${code}, signal=${signal})`));
+        const message = `Restream process exited before manifest was ready (code=${code}, signal=${signal})`;
+        const error = new Error(formatErrorMessage(message, stdoutBuffer, stderrBuffer));
+        error.exitCode = code;
+        error.signal = signal;
+        error.stdout = stdoutBuffer;
+        error.stderr = stderrBuffer;
+        reject(error);
       };
 
       const onError = (error) => {
         cleanup();
-        reject(error);
+        const wrapped = new Error(formatErrorMessage(error.message || 'Restream process error', stdoutBuffer, stderrBuffer));
+        wrapped.exitCode = error.code;
+        wrapped.signal = error.signal;
+        wrapped.stdout = stdoutBuffer;
+        wrapped.stderr = stderrBuffer;
+        reject(wrapped);
+      };
+
+      const onStdout = (data) => {
+        stdoutBuffer = appendWithLimit(stdoutBuffer, data.toString());
+      };
+
+      const onStderr = (data) => {
+        stderrBuffer = appendWithLimit(stderrBuffer, data.toString());
       };
 
       if (child) {
         child.once('exit', onExit);
         child.once('error', onError);
+        child.stdout?.on('data', onStdout);
+        child.stderr?.on('data', onStderr);
       }
 
       const poll = async () => {
@@ -126,7 +154,12 @@ class Restreamer {
             timeoutMs,
             channelId,
           });
-          reject(new Error(`Timed out waiting for restream manifest at ${manifestPath}`));
+          const error = new Error(
+            formatErrorMessage(`Timed out waiting for restream manifest at ${manifestPath}`, stdoutBuffer, stderrBuffer),
+          );
+          error.stdout = stdoutBuffer;
+          error.stderr = stderrBuffer;
+          reject(error);
           return;
         }
 
@@ -138,6 +171,8 @@ class Restreamer {
         if (child) {
           child.off('exit', onExit);
           child.off('error', onError);
+          child.stdout?.off('data', onStdout);
+          child.stderr?.off('data', onStderr);
         }
       };
 
@@ -183,3 +218,11 @@ class Restreamer {
 }
 
 module.exports = Restreamer;
+
+function formatErrorMessage(message, stdoutBuffer = '', stderrBuffer = '') {
+  const details = [];
+  if (stderrBuffer) details.push(`stderr:\n${stderrBuffer.trim()}`);
+  if (stdoutBuffer) details.push(`stdout:\n${stdoutBuffer.trim()}`);
+  if (!details.length) return message;
+  return `${message}\n${details.join('\n---\n')}`;
+}

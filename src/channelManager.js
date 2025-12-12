@@ -163,7 +163,12 @@ class ChannelManager {
             this.logger?.warn('Restream job could not be created', { id: channel.id });
           }
         } catch (error) {
-          this.logger?.warn(`Failed to restream embed for ${channel.id}`, { error: error.message });
+          this.logger?.warn(`Failed to restream embed for ${channel.id}`, {
+            error: error.message,
+            exitCode: error.exitCode,
+            signal: error.signal,
+            stderr: error.stderr,
+          });
         }
       }
     };

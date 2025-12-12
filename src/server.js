@@ -217,23 +217,26 @@ async function serveTransmuxedManifest(req, res, channel) {
   }
 }
 
-async function serveRestreamedManifest(req, res, channel) {
-  try {
-    const job = await channelManager.ensureRestreamed(channel);
-    const manifestBody = await fs.promises.readFile(job.manifestPath, 'utf8');
-    const base = `${req.protocol}://${req.get('host')}/hls/${encodeURIComponent(channel.id)}/local`;
-    const rewritten = channelManager.rewriteLocalManifest(manifestBody, base);
-    res.set('Content-Type', 'application/vnd.apple.mpegurl');
-    return res.send(rewritten);
-  } catch (error) {
-    logger.error('Failed to serve restreamed manifest', {
-      channelId: channel?.id,
-      targetUrl: channel?.embedUrl,
-      message: error.message,
-    });
-    return res.status(502).send('Failed to restream embed');
+  async function serveRestreamedManifest(req, res, channel) {
+    try {
+      const job = await channelManager.ensureRestreamed(channel);
+      const manifestBody = await fs.promises.readFile(job.manifestPath, 'utf8');
+      const base = `${req.protocol}://${req.get('host')}/hls/${encodeURIComponent(channel.id)}/local`;
+      const rewritten = channelManager.rewriteLocalManifest(manifestBody, base);
+      res.set('Content-Type', 'application/vnd.apple.mpegurl');
+      return res.send(rewritten);
+    } catch (error) {
+      logger.error('Failed to serve restreamed manifest', {
+        channelId: channel?.id,
+        targetUrl: channel?.embedUrl,
+        message: error.message,
+        exitCode: error.exitCode,
+        signal: error.signal,
+      });
+      const detail = error?.message ? `: ${error.message}` : '';
+      return res.status(502).send(`Failed to restream embed${detail}`);
+    }
   }
-}
 
 app.get('/hls/:id', async (req, res) => {
   const channel = channelManager.getChannelById(req.params.id);
