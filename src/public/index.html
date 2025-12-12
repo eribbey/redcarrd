@@ -64,7 +64,19 @@
             <h2>Logs</h2>
             <p class="muted">Latest activity from scraper and proxy — <span id="logStatus">Live</span></p>
           </div>
-          <button id="toggleLogs" class="secondary" type="button">Pause logs</button>
+          <div class="log-actions">
+            <label class="inline-label">
+              Level
+              <select id="logLevelFilter">
+                <option value="all">All</option>
+                <option value="debug">Debug & above</option>
+                <option value="info">Info & above</option>
+                <option value="warn">Warnings & errors</option>
+                <option value="error">Errors only</option>
+              </select>
+            </label>
+            <button id="toggleLogs" class="secondary" type="button">Pause logs</button>
+          </div>
         </div>
         <pre id="logs" class="logs"></pre>
       </section>

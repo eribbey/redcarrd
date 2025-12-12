@@ -16,6 +16,7 @@ class Restreamer {
 
     const existing = this.jobs.get(channelId);
     if (existing) {
+      this.logger?.debug('Reusing existing restream job', { channelId, workDir: existing.workDir });
       existing.lastAccessed = Date.now();
       return existing;
     }
@@ -24,9 +25,11 @@ class Restreamer {
     const manifestPath = path.join(workDir, `${channelId}.m3u8`);
     const args = [this.scriptPath, embedUrl, channelId, workDir];
 
-    this.logger?.info('Starting restream job', { channelId, embedUrl, workDir });
+    this.logger?.info('Starting restream job', { channelId, embedUrl, workDir, readinessTimeoutMs: this.readinessTimeoutMs });
 
     const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+
+    this.logger?.debug('Spawned restream process', { channelId, pid: child.pid, args });
 
     child.stdout.on('data', (data) => {
       this.logger?.debug('Restream stdout', { channelId, message: data.toString() });
@@ -36,7 +39,7 @@ class Restreamer {
       this.logger?.warn('Restream stderr', { channelId, message: data.toString() });
     });
 
-    const readyPromise = this.waitForManifest(manifestPath, this.readinessTimeoutMs, child);
+    const readyPromise = this.waitForManifest(manifestPath, this.readinessTimeoutMs, child, channelId);
 
     const completion = new Promise((resolve) => {
       child.on('exit', (code, signal) => {
@@ -76,10 +79,12 @@ class Restreamer {
     return job;
   }
 
-  async waitForManifest(manifestPath, timeoutMs, child) {
+  async waitForManifest(manifestPath, timeoutMs, child, channelId) {
     return new Promise((resolve, reject) => {
       const start = Date.now();
       let timer;
+
+      this.logger?.debug('Waiting for restream manifest', { manifestPath, timeoutMs, channelId });
 
       const onExit = (code, signal) => {
         cleanup();
@@ -101,6 +106,12 @@ class Restreamer {
           const stats = await fs.promises.stat(manifestPath);
           if (stats.size > 0) {
             cleanup();
+            this.logger?.info('Restream manifest detected', {
+              manifestPath,
+              elapsedMs: Date.now() - start,
+              size: stats.size,
+              channelId,
+            });
             resolve(true);
             return;
           }
@@ -110,6 +121,11 @@ class Restreamer {
 
         if (Date.now() - start >= timeoutMs) {
           cleanup();
+          this.logger?.error('Timed out waiting for restream manifest', {
+            manifestPath,
+            timeoutMs,
+            channelId,
+          });
           reject(new Error(`Timed out waiting for restream manifest at ${manifestPath}`));
           return;
         }
