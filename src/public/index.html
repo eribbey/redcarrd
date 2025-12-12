@@ -7,80 +7,82 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <header>
-      <h1>Redcarrd IPTV Proxy</h1>
-      <p class="muted">Self-hosted IPTV playlist and EPG builder for streamed.pk</p>
-    </header>
+    <div class="page">
+      <header>
+        <h1>Redcarrd IPTV Proxy</h1>
+        <p class="muted">Self-hosted IPTV playlist and EPG builder for streamed.pk</p>
+      </header>
 
-    <div id="errorBanner" class="toast hidden" role="status" aria-live="polite"></div>
+      <div id="errorBanner" class="toast hidden" role="status" aria-live="polite"></div>
 
-    <main>
-      <section class="card">
-        <div class="card-header">
-          <div>
-            <h2>Configuration</h2>
-            <p class="muted">Select categories and refresh cadence</p>
+      <main>
+        <section class="card">
+          <div class="card-header">
+            <div>
+              <h2>Configuration</h2>
+              <p class="muted">Select categories and refresh cadence</p>
+            </div>
+            <button id="rebuildBtn" class="primary">Rebuild now</button>
           </div>
-          <button id="rebuildBtn" class="primary">Rebuild now</button>
-        </div>
-        <form id="configForm" class="config-grid">
-          <label>
-            Categories
-            <input id="categories" type="text" placeholder="football,basketball" />
-            <small>Comma-separated list. Leave empty to include everything.</small>
-          </label>
-          <label>
-            Rebuild interval (minutes)
-            <input id="interval" type="number" min="5" step="5" />
-          </label>
-          <label>
-            Lifetime (hours)
-            <input id="lifetime" type="number" min="1" step="1" />
-          </label>
-          <button type="submit" class="secondary">Save configuration</button>
-        </form>
-      </section>
-
-      <section class="card">
-        <div class="card-header">
-          <div>
-            <h2>Channels</h2>
-            <p class="muted">Preview and adjust source endpoints exposed by streamed.pk</p>
-          </div>
-          <div class="links">
-            <button id="playlistBtn" class="secondary link-button" type="button">
-              Download playlist.m3u8
-            </button>
-            <button id="epgBtn" class="secondary link-button" type="button">Download EPG</button>
-          </div>
-        </div>
-        <p id="playlistStatus" class="muted"></p>
-        <div id="channels" class="channel-grid"></div>
-      </section>
-
-      <section class="card">
-        <div class="card-header">
-          <div>
-            <h2>Logs</h2>
-            <p class="muted">Latest activity from scraper and proxy — <span id="logStatus">Live</span></p>
-          </div>
-          <div class="log-actions">
-            <label class="inline-label">
-              Level
-              <select id="logLevelFilter">
-                <option value="all">All</option>
-                <option value="debug">Debug & above</option>
-                <option value="info">Info & above</option>
-                <option value="warn">Warnings & errors</option>
-                <option value="error">Errors only</option>
-              </select>
+          <form id="configForm" class="config-grid">
+            <label>
+              Categories
+              <input id="categories" type="text" placeholder="football,basketball" />
+              <small>Comma-separated list. Leave empty to include everything.</small>
             </label>
-            <button id="toggleLogs" class="secondary" type="button">Pause logs</button>
+            <label>
+              Rebuild interval (minutes)
+              <input id="interval" type="number" min="5" step="5" />
+            </label>
+            <label>
+              Lifetime (hours)
+              <input id="lifetime" type="number" min="1" step="1" />
+            </label>
+            <button type="submit" class="secondary">Save configuration</button>
+          </form>
+        </section>
+
+        <section class="card">
+          <div class="card-header">
+            <div>
+              <h2>Channels</h2>
+              <p class="muted">Preview and adjust source endpoints exposed by streamed.pk</p>
+            </div>
+            <div class="links">
+              <button id="playlistBtn" class="secondary link-button" type="button">
+                Download playlist.m3u8
+              </button>
+              <button id="epgBtn" class="secondary link-button" type="button">Download EPG</button>
+            </div>
           </div>
-        </div>
-        <pre id="logs" class="logs"></pre>
-      </section>
-    </main>
+          <p id="playlistStatus" class="muted"></p>
+          <div id="channels" class="channel-grid"></div>
+        </section>
+
+        <section class="card">
+          <div class="card-header">
+            <div>
+              <h2>Logs</h2>
+              <p class="muted">Latest activity from scraper and proxy — <span id="logStatus">Live</span></p>
+            </div>
+            <div class="log-actions">
+              <label class="inline-label">
+                Level
+                <select id="logLevelFilter">
+                  <option value="all">All</option>
+                  <option value="debug">Debug & above</option>
+                  <option value="info">Info & above</option>
+                  <option value="warn">Warnings & errors</option>
+                  <option value="error">Errors only</option>
+                </select>
+              </label>
+              <button id="toggleLogs" class="secondary" type="button">Pause logs</button>
+            </div>
+          </div>
+          <pre id="logs" class="logs"></pre>
+        </section>
+      </main>
+    </div>
 
     <template id="channelTemplate">
       <div class="channel-card">
