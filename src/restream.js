@@ -19,6 +19,26 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 
+const DEFAULT_STREAM_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+
+const PLAYWRIGHT_LAUNCH_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--autoplay-policy=no-user-gesture-required',
+  '--disable-notifications',
+  '--mute-audio',
+  '--disable-features=IsolateOrigins,site-per-process,AutomationControlled',
+  '--disable-site-isolation-trials',
+];
+
+function randomDesktopViewport() {
+  const widths = [1280, 1366, 1440, 1536, 1920];
+  const width = widths[Math.floor(Math.random() * widths.length)];
+  const height = Math.floor(width * (9 / 16) + Math.random() * 60);
+  return { width, height };
+}
+
 async function main() {
   const pageUrl = process.argv[2];
   const streamName = process.argv[3] || 'stream';
@@ -40,24 +60,40 @@ async function main() {
   let context;
   let page;
   let ffmpegProc;
+  const userAgent = DEFAULT_STREAM_UA;
+  const viewport = randomDesktopViewport();
 
   try {
     browser = await chromium.launch({
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--autoplay-policy=no-user-gesture-required',
-        '--disable-notifications',
-        '--mute-audio'
-      ]
+      args: PLAYWRIGHT_LAUNCH_ARGS
     });
 
-    // Add init script to neuter window.open before any page scripts run
-    context = await browser.newContext();
+    context = await browser.newContext({
+      userAgent,
+      viewport,
+      ignoreHTTPSErrors: true,
+      bypassCSP: true,
+      locale: 'en-US',
+      extraHTTPHeaders: {
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+
     await context.addInitScript(() => {
       // Disable popups
       window.open = () => null;
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4] });
+      window.chrome = window.chrome || { runtime: {} };
+      const originalQuery = window.navigator.permissions?.query;
+      if (originalQuery) {
+        window.navigator.permissions.query = (parameters) =>
+          parameters?.name === 'notifications'
+            ? Promise.resolve({ state: 'denied' })
+            : originalQuery(parameters);
+      }
     });
 
     page = await context.newPage();
@@ -76,24 +112,42 @@ async function main() {
       } catch (_) {}
     });
 
-    // Promise that resolves when we see a .m3u8 request
-    const hlsUrlPromise = waitForHlsUrl(page, 90000);
-
     console.log('[+] Navigating to page…');
     await page.goto(pageUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 90000
     });
 
-    console.log('[+] Trying to start playback…');
-    await autoplayVideo(page);
+    const maxDetectionAttempts = 2;
+    let hlsUrl = null;
+    let lastDetectionError = null;
 
-    console.log('[+] Waiting for underlying HLS (.m3u8) URL…');
-    const hlsUrl = await hlsUrlPromise;
+    for (let attempt = 1; attempt <= maxDetectionAttempts; attempt += 1) {
+      const hlsUrlPromise = waitForHlsUrl(page, 90000);
+
+      if (attempt > 1) {
+        console.warn(`[!] Retrying playback/HLS detection (attempt ${attempt}/${maxDetectionAttempts})…`);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 });
+      }
+
+      console.log('[+] Trying to start playback…');
+      await autoplayVideo(page);
+
+      console.log('[+] Waiting for underlying HLS (.m3u8) URL…');
+      try {
+        hlsUrl = await hlsUrlPromise;
+        break;
+      } catch (error) {
+        lastDetectionError = error;
+      }
+    }
+
+    if (!hlsUrl) {
+      throw lastDetectionError || new Error('Failed to detect .m3u8 URL');
+    }
     console.log(`[+] Detected source HLS URL: ${hlsUrl}`);
 
     // Collect user-agent and cookies to help ffmpeg mimic the browser
-    const userAgent = await page.evaluate(() => navigator.userAgent);
     const cookies = await context.cookies(hlsUrl).catch(() => []);
     const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
 
