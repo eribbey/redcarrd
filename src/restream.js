@@ -39,6 +39,14 @@ function randomDesktopViewport() {
   return { width, height };
 }
 
+function parseBooleanEnv(value, defaultValue = false) {
+  if (value === undefined) return defaultValue;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return defaultValue;
+}
+
 async function main() {
   const pageUrl = process.argv[2];
   const streamName = process.argv[3] || 'stream';
@@ -118,15 +126,28 @@ async function main() {
       timeout: 90000
     });
 
-    const maxDetectionAttempts = 2;
+    const maxDetectionAttempts = Math.max(
+      1,
+      parseInt(process.env.RESTREAM_MAX_ATTEMPTS, 10) || 4
+    );
+    const enableConfigFallback = parseBooleanEnv(
+      process.env.RESTREAM_DETECT_CONFIG_FALLBACK,
+      false
+    );
+    const reloadBackoffMs = 2000;
     let streamInfo = null;
     let lastDetectionError = null;
 
     for (let attempt = 1; attempt <= maxDetectionAttempts; attempt += 1) {
-      const streamUrlPromise = waitForHlsUrl(page, 90000);
+      const streamUrlPromise = waitForHlsUrl(page, 90000, { enableConfigFallback });
 
       if (attempt > 1) {
         console.warn(`[!] Retrying playback/HLS detection (attempt ${attempt}/${maxDetectionAttempts})…`);
+        const backoff = reloadBackoffMs * 2 ** (attempt - 2);
+        if (backoff > 0) {
+          console.log(`[+] Waiting ${backoff} ms before reload to allow player initialization…`);
+          await page.waitForTimeout(backoff);
+        }
         await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 });
       }
 
@@ -244,10 +265,15 @@ async function main() {
 /**
  * Resolve with first streaming URL seen in network requests.
  * Supports HLS (.m3u8), DASH (.mpd), and progressive MP4 as a fallback.
+ * If enabled, will fall back to inspecting player configuration when
+ * network sniffing times out.
  */
-function waitForHlsUrl(page, timeoutMs = 30000) {
+function waitForHlsUrl(page, timeoutMs = 30000, options = {}) {
+  const { enableConfigFallback = false } = options;
+
   return new Promise((resolve, reject) => {
     let done = false;
+    let lastConfigError = null;
 
     function finish(err, info) {
       if (done) return;
@@ -258,8 +284,25 @@ function waitForHlsUrl(page, timeoutMs = 30000) {
       resolve(info);
     }
 
-    const timer = setTimeout(() => {
-      finish(new Error('Timed out waiting for stream URL'));
+    const timer = setTimeout(async () => {
+      if (enableConfigFallback) {
+        try {
+          console.warn('[!] Network sniff timed out; attempting config fallback…');
+          const fallbackInfo = await detectFromPlayerConfig(page);
+          if (fallbackInfo) {
+            console.log('[+] Located stream via player configuration fallback.');
+            finish(null, fallbackInfo);
+            return;
+          }
+        } catch (error) {
+          lastConfigError = error;
+        }
+      }
+
+      const timeoutMessage = lastConfigError
+        ? `Timed out waiting for stream URL (config fallback failed: ${lastConfigError.message})`
+        : 'Timed out waiting for stream URL';
+      finish(new Error(timeoutMessage));
     }, timeoutMs);
 
     function onRequest(request) {
@@ -279,6 +322,71 @@ function waitForHlsUrl(page, timeoutMs = 30000) {
 
     page.on('request', onRequest);
   });
+}
+
+async function detectFromPlayerConfig(page) {
+  const info = await page.evaluate(() => {
+    function inferType(url, mime) {
+      if (!url && !mime) return null;
+      const target = (url || '').toLowerCase();
+      const mimeType = (mime || '').toLowerCase();
+
+      if (/\.m3u8(\?|$)/i.test(target) || mimeType.includes('application/vnd.apple.mpegurl')) {
+        return 'hls';
+      }
+      if (/\.mpd(\?|$)/i.test(target) || mimeType.includes('dash')) {
+        return 'dash';
+      }
+      if (/\.mp4(\?|$)/i.test(target) || mimeType.includes('mp4')) {
+        return 'progressive';
+      }
+      return null;
+    }
+
+    function normalizeCandidate(url, mime) {
+      if (!url) return null;
+      const type = inferType(url, mime);
+      return { url, type: type || 'progressive' };
+    }
+
+    const candidates = [];
+
+    // JWPlayer playlist inspection
+    if (typeof window.jwplayer === 'function') {
+      try {
+        const playerInstance = window.jwplayer();
+        if (playerInstance && typeof playerInstance.getPlaylist === 'function') {
+          const playlist = playerInstance.getPlaylist() || [];
+          playlist.forEach((item) => {
+            if (item.file) {
+              const candidate = normalizeCandidate(item.file, item.type);
+              if (candidate) candidates.push(candidate);
+            }
+            (item.sources || []).forEach((source) => {
+              const candidate = normalizeCandidate(source.file, source.type);
+              if (candidate) candidates.push(candidate);
+            });
+          });
+        }
+      } catch (err) {
+        // ignore JWPlayer inspection errors
+      }
+    }
+
+    // HTML5 video elements
+    document.querySelectorAll('video').forEach((vid) => {
+      const current = normalizeCandidate(vid.currentSrc || vid.src, vid.type || vid.currentType);
+      if (current) candidates.push(current);
+      vid.querySelectorAll('source').forEach((source) => {
+        const candidate = normalizeCandidate(source.src, source.type);
+        if (candidate) candidates.push(candidate);
+      });
+    });
+
+    return candidates.find((c) => c.type !== 'progressive') || candidates[0] || null;
+  });
+
+  return info;
 }
 
 /**
