@@ -4,28 +4,46 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 class Restreamer {
-  constructor({ logger, scriptPath = path.join(__dirname, 'restream.js'), readinessTimeoutMs = 120000 }) {
+  constructor({
+    logger,
+    scriptPath = path.join(__dirname, 'restream.js'),
+    readinessTimeoutMs = 120000,
+    tempRoot = os.tmpdir(),
+  }) {
     this.logger = logger;
     this.scriptPath = scriptPath;
     this.readinessTimeoutMs = readinessTimeoutMs;
+    this.tempRoot = tempRoot;
     this.jobs = new Map();
   }
 
   async ensureJob(channelId, embedUrl) {
     if (!embedUrl) return null;
 
+    const writableTempRoot = await this.ensureWritableTempRoot();
+
     const existing = this.jobs.get(channelId);
     if (existing) {
-      this.logger?.debug('Reusing existing restream job', { channelId, workDir: existing.workDir });
+      this.logger?.debug('Reusing existing restream job', {
+        channelId,
+        workDir: existing.workDir,
+        tempRoot: existing.tempRoot,
+      });
       existing.lastAccessed = Date.now();
       return existing;
     }
 
-    const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'restream-'));
+    const workDir = await fs.promises.mkdtemp(path.join(writableTempRoot, 'restream-'));
     const manifestPath = path.join(workDir, `${channelId}.m3u8`);
     const args = [this.scriptPath, embedUrl, channelId, workDir];
 
-    this.logger?.info('Starting restream job', { channelId, embedUrl, workDir, readinessTimeoutMs: this.readinessTimeoutMs });
+    this.logger?.info('Starting restream job', {
+      channelId,
+      embedUrl,
+      workDir,
+      tempRoot: writableTempRoot,
+      readinessTimeoutMs: this.readinessTimeoutMs,
+    });
 
     const child = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
@@ -67,6 +85,7 @@ class Restreamer {
     const job = {
       channelId,
       embedUrl,
+      tempRoot: writableTempRoot,
       workDir,
       manifestPath,
       process: child,
@@ -77,6 +96,34 @@ class Restreamer {
 
     this.jobs.set(channelId, job);
     return job;
+  }
+
+  async ensureWritableTempRoot() {
+    const resolvedTempRoot = path.resolve(this.tempRoot || os.tmpdir());
+    const probeDir = path.join(resolvedTempRoot, 'restreamer-probe');
+    const probeFile = path.join(probeDir, `.probe-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+
+    this.logger?.debug('Checking temp root writability', {
+      tempRoot: this.tempRoot,
+      resolvedTempRoot,
+      probeFile,
+    });
+
+    try {
+      await fs.promises.access(resolvedTempRoot, fs.constants.W_OK);
+      await fs.promises.mkdir(probeDir, { recursive: true });
+      await fs.promises.writeFile(probeFile, 'probe');
+      await fs.promises.unlink(probeFile);
+      await fs.promises.rm(probeDir, { recursive: true, force: true });
+
+      this.logger?.debug('Temp root writable', { tempRoot: this.tempRoot, resolvedTempRoot });
+      return resolvedTempRoot;
+    } catch (error) {
+      this.logger?.error('Temp root is not writable', { tempRoot: resolvedTempRoot, error: error.message });
+      const wrapped = new Error(`Temp directory ${resolvedTempRoot} is not writable: ${error.message}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
   }
 
   async waitForManifest(manifestPath, timeoutMs, child, channelId) {
