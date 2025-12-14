@@ -7,4 +7,7 @@ services:
     environment:
       - PORT=3005
       - FRONT_PAGE_URL=https://streamed.pk
+      # Point to an existing Flaresolverr/Byparr instance to help bypass challenges.
+      # Example: http://flaresolverr:8191/v1 or any reachable host:port.
+      - SOLVER_ENDPOINT_URL=http://flaresolverr:8191/v1
     restart: unless-stopped

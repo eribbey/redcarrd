@@ -6,6 +6,7 @@ const fs = require('fs');
 const https = require('https');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
+const { createSolverClientFromEnv, normalizeSolverCookies } = require('./solverClient');
 
 const DEFAULT_STREAM_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
@@ -141,6 +142,8 @@ async function fetchRenderedHtml(url, logger, options = {}) {
     ? options.userAgents
     : USER_AGENT_POOL;
 
+  const solverClient = createSolverClientFromEnv(logger);
+
   let lastError = null;
   let lastCookies = [];
   let lastCookieHeader = '';
@@ -151,10 +154,14 @@ async function fetchRenderedHtml(url, logger, options = {}) {
     const viewport = randomDesktopViewport();
     const acceptLanguageHeader = attempt % 2 === 0 ? 'en-US,en;q=0.9' : 'en-US,en;q=0.9,en-GB;q=0.8';
 
+    const solverBootstrap = solverClient?.enabled
+      ? await solverClient.solve(normalizedUrl, { userAgent, headers: { 'Accept-Language': acceptLanguageHeader } })
+      : null;
+
     let browser;
     let context;
     const setCookieHeaders = new Set();
-      const discoveredStreams = new Map();
+    const discoveredStreams = new Map();
     let pageErrorOccurred = false;
 
     try {
@@ -170,6 +177,22 @@ async function fetchRenderedHtml(url, logger, options = {}) {
           'Accept-Language': acceptLanguageHeader,
         },
       });
+
+      if (solverBootstrap?.normalizedCookies?.length) {
+        try {
+          await context.addCookies(solverBootstrap.normalizedCookies);
+          logger?.info('Applied solver bootstrap cookies to context', {
+            url: normalizedUrl,
+            provider: solverClient.provider,
+            cookieCount: solverBootstrap.normalizedCookies.length,
+          });
+        } catch (error) {
+          logger?.warn('Failed to apply solver bootstrap cookies', {
+            url: normalizedUrl,
+            error: error.message,
+          });
+        }
+      }
 
       context.addInitScript(() => {
         Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
@@ -379,7 +402,32 @@ async function fetchRenderedHtml(url, logger, options = {}) {
         const clearanceObserved =
           headerHasClearance || (await waitForCloudflareClearance(context, page, logger, normalizedUrl));
 
-        if (!clearanceObserved) {
+        let challengeCleared = clearanceObserved;
+
+        if (!challengeCleared && solverClient?.enabled) {
+          logger?.info('Attempting solver client to bypass challenge', {
+            url: normalizedUrl,
+            provider: solverClient.provider,
+          });
+
+          const solverAttempt = await solverClient.solve(normalizedUrl, {
+            userAgent,
+            headers: { 'Accept-Language': acceptLanguageHeader },
+          });
+
+          const solverCookies = solverAttempt?.normalizedCookies?.length
+            ? solverAttempt.normalizedCookies
+            : normalizeSolverCookies(solverAttempt?.cookies || [], normalizedUrl);
+
+          if (solverCookies?.length) {
+            await context.addCookies(solverCookies);
+            navigationResponse = await page.goto(normalizedUrl, { waitUntil: 'domcontentloaded' });
+            challengeCleared =
+              !isCloudflareChallengeUrl(page.url()) && !(await isCloudflareChallengeResponse(navigationResponse));
+          }
+        }
+
+        if (!challengeCleared) {
           logger?.error('Cloudflare challenge could not be bypassed', { url: normalizedUrl });
           throw new Error(`Cloudflare challenge could not be bypassed for ${normalizedUrl}`);
         }

@@ -36,3 +36,13 @@ Or with Docker Compose:
 ```bash
 docker-compose up --build
 ```
+
+### Using an existing Flaresolverr/Byparr solver
+Set `SOLVER_ENDPOINT_URL` (or `SOLVER_URL`) to point at a reachable solver instance. For example, if you already run Flaresolverr in Docker Compose, you can reuse it by adding the environment variable to this service:
+
+```yaml
+environment:
+  - SOLVER_ENDPOINT_URL=http://flaresolverr:8191/v1
+```
+
+This lets the app call the solver to obtain challenge-bypassed cookies before Playwright launches pages.
