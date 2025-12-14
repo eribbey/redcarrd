@@ -26,13 +26,22 @@ class Restreamer {
 
     const existing = this.jobs.get(channelId);
     if (existing) {
-      this.logger?.debug('Reusing existing restream job', {
-        channelId,
-        workDir: existing.workDir,
-        tempRoot: existing.tempRoot,
-      });
-      existing.lastAccessed = Date.now();
-      return existing;
+      if (await this.isJobStale(existing)) {
+        this.logger?.warn('Existing restream job is stale; restarting', {
+          channelId,
+          workDir: existing.workDir,
+          tempRoot: existing.tempRoot,
+        });
+        await this.cleanupJob(channelId);
+      } else {
+        this.logger?.debug('Reusing existing restream job', {
+          channelId,
+          workDir: existing.workDir,
+          tempRoot: existing.tempRoot,
+        });
+        existing.lastAccessed = Date.now();
+        return existing;
+      }
     }
 
     const workDir = await fs.promises.mkdtemp(path.join(writableTempRoot, 'restream-'));
@@ -98,6 +107,29 @@ class Restreamer {
 
     this.jobs.set(channelId, job);
     return job;
+  }
+
+  async isJobStale(job) {
+    if (!job?.process) return true;
+
+    const { exitCode, signalCode, killed } = job.process;
+    if (exitCode !== null || signalCode || killed) {
+      return true;
+    }
+
+    if (!job.manifestPath) return true;
+
+    try {
+      const stats = await fs.promises.stat(job.manifestPath);
+      return stats.size <= 0;
+    } catch (error) {
+      this.logger?.warn('Failed to stat restream manifest; treating job as stale', {
+        channelId: job.channelId,
+        manifestPath: job.manifestPath,
+        error: error.message,
+      });
+      return true;
+    }
   }
 
   async ensureWritableTempRoot() {
