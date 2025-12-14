@@ -177,11 +177,14 @@ async function main() {
     if (cookieHeader) headerLines.push(`Cookie: ${cookieHeader}`);
     const headersArg = headerLines.join('\r\n') + '\r\n';
 
-    const outPlaylist = path.join(outputDir, `${streamName}.m3u8`);
-    const outSegments = path.join(outputDir, `${streamName}_%03d.ts`);
+    const playlistFilename = `${streamName}.m3u8`;
+    const segmentFilenamePattern = `${streamName}_%03d.ts`;
+    const outPlaylist = path.join(outputDir, playlistFilename);
+    const outSegments = path.join(outputDir, segmentFilenamePattern);
 
     console.log('[+] Starting ffmpeg HLS restream…');
     console.log(`[+] Output playlist: ${outPlaylist}`);
+    console.log(`[+] Segment filename pattern: ${outSegments}`);
 
     const isDash = streamInfo.type === 'dash';
 
@@ -206,12 +209,13 @@ async function main() {
       '-hls_flags', 'delete_segments+append_list+program_date_time',
       '-hls_playlist_type', 'live',
       '-start_number', '0',
-      '-hls_segment_filename', outSegments,
-      outPlaylist
+      '-hls_segment_filename', segmentFilenamePattern,
+      playlistFilename
     ];
 
     ffmpegProc = spawn('ffmpeg', ffmpegArgs, {
-      stdio: ['ignore', 'pipe', 'pipe']
+      stdio: ['ignore', 'pipe', 'pipe'],
+      cwd: outputDir,
     });
 
     ffmpegProc.stdout.on('data', (data) => {
