@@ -15,12 +15,14 @@ class Restreamer {
     this.readinessTimeoutMs = readinessTimeoutMs;
     this.tempRoot = tempRoot;
     this.jobs = new Map();
+    this.dependencyCheckPromise = null;
   }
 
   async ensureJob(channelId, embedUrl) {
     if (!embedUrl) return null;
 
     const writableTempRoot = await this.ensureWritableTempRoot();
+    await this.ensureDependencies();
 
     const existing = this.jobs.get(channelId);
     if (existing) {
@@ -121,6 +123,76 @@ class Restreamer {
     } catch (error) {
       this.logger?.error('Temp root is not writable', { tempRoot: resolvedTempRoot, error: error.message });
       const wrapped = new Error(`Temp directory ${resolvedTempRoot} is not writable: ${error.message}`);
+      wrapped.cause = error;
+      throw wrapped;
+    }
+  }
+
+  async ensureDependencies() {
+    if (this.dependencyCheckPromise) return this.dependencyCheckPromise;
+
+    this.dependencyCheckPromise = (async () => {
+      await this.checkFfmpegAvailable();
+      await this.checkPlaywrightLaunchable();
+    })();
+
+    try {
+      await this.dependencyCheckPromise;
+      this.logger?.debug('Restreamer dependencies ready');
+    } catch (error) {
+      this.logger?.error('Restreamer dependency check failed', { error: error.message });
+      this.dependencyCheckPromise = null;
+      throw error;
+    }
+
+    return this.dependencyCheckPromise;
+  }
+
+  async checkFfmpegAvailable() {
+    this.logger?.debug('Checking ffmpeg availability');
+
+    return new Promise((resolve, reject) => {
+      const child = spawn('ffmpeg', ['-version'], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let output = '';
+      const timeout = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error('ffmpeg -version timed out'));
+      }, 5000);
+
+      child.stdout?.on('data', (data) => {
+        output += data.toString();
+      });
+
+      child.stderr?.on('data', (data) => {
+        output += data.toString();
+      });
+
+      child.once('error', (error) => {
+        clearTimeout(timeout);
+        reject(new Error(`ffmpeg not available: ${error.message}`));
+      });
+
+      child.once('exit', (code) => {
+        clearTimeout(timeout);
+        if (code === 0) {
+          resolve(true);
+        } else {
+          reject(new Error(`ffmpeg -version exited with code ${code}${output ? `: ${output.trim()}` : ''}`));
+        }
+      });
+    });
+  }
+
+  async checkPlaywrightLaunchable() {
+    this.logger?.debug('Checking Playwright/Chromium availability');
+
+    try {
+      const { chromium } = require('playwright');
+      const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+      await browser.close();
+      return true;
+    } catch (error) {
+      const wrapped = new Error(`Failed to launch Playwright Chromium: ${error.message}`);
       wrapped.cause = error;
       throw wrapped;
     }
