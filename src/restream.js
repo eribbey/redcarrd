@@ -264,6 +264,14 @@ async function main() {
     }
     process.exit(0);
   });
+
+  process.on('SIGTERM', () => {
+    console.log('\n[!] Caught SIGTERM, shutting down…');
+    if (ffmpegProc && !ffmpegProc.killed) {
+      ffmpegProc.kill('SIGTERM');
+    }
+    process.exit(0);
+  });
 }
 
 /**
