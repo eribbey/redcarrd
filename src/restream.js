@@ -22,6 +22,7 @@ const { chromium } = require('playwright');
 const { spawn } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { createSolverClientFromEnv } = require('./solverClient');
 
 const DEFAULT_STREAM_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
@@ -51,6 +52,31 @@ function parseBooleanEnv(value, defaultValue = false) {
   return defaultValue;
 }
 
+const CLOUDFLARE_CHALLENGE_PATTERNS = [/cdn-cgi\/challenge/i, /__cf_chl_captcha_tk__/i];
+
+const isCloudflareChallengeUrl = (value = '') =>
+  CLOUDFLARE_CHALLENGE_PATTERNS.some((pattern) => pattern.test(value));
+
+async function isCloudflareChallengeResponse(response) {
+  if (!response) return false;
+
+  const responseUrl = response.url();
+  if (isCloudflareChallengeUrl(responseUrl)) return true;
+
+  const status = response.status();
+  if (status !== 403 && status !== 503) return false;
+
+  try {
+    const body = await response.text();
+    const lower = body?.toLowerCase?.() || '';
+    if (!lower) return false;
+
+    return /cloudflare/.test(lower) && /(attention required|just a moment|checking your browser|challenge)/.test(lower);
+  } catch (error) {
+    return false;
+  }
+}
+
 async function main() {
   const pageUrl = process.argv[2];
   const streamName = process.argv[3] || 'stream';
@@ -74,8 +100,18 @@ async function main() {
   let ffmpegProc;
   const userAgent = DEFAULT_STREAM_UA;
   const viewport = randomDesktopViewport();
+  const solverClient = createSolverClientFromEnv(console);
+  let solverBootstrap = null;
 
   try {
+    if (solverClient?.enabled) {
+      console.log('[+] Attempting solver prefetch before launching Playwright…');
+      solverBootstrap = await solverClient.solve(pageUrl, { userAgent });
+      if (solverBootstrap?.normalizedCookies?.length) {
+        console.log('[+] Solver prefetch returned cookies; applying to browser context once launched.');
+      }
+    }
+
     browser = await chromium.launch({
       headless: true,
       args: PLAYWRIGHT_LAUNCH_ARGS
@@ -91,6 +127,14 @@ async function main() {
         'Accept-Language': 'en-US,en;q=0.9',
       },
     });
+
+    if (solverBootstrap?.normalizedCookies?.length) {
+      try {
+        await context.addCookies(solverBootstrap.normalizedCookies);
+      } catch (error) {
+        console.warn('[!] Failed to apply solver cookies to context', { error: error.message });
+      }
+    }
 
     await context.addInitScript(() => {
       // Disable popups
@@ -125,10 +169,33 @@ async function main() {
     });
 
     console.log('[+] Navigating to page…');
-    await page.goto(pageUrl, {
+    let navigationResponse = await page.goto(pageUrl, {
       waitUntil: 'domcontentloaded',
       timeout: 90000
     });
+
+    const challengeDetected =
+      isCloudflareChallengeUrl(page.url()) || (await isCloudflareChallengeResponse(navigationResponse));
+
+    if (challengeDetected && solverClient?.enabled) {
+      console.warn('[!] Challenge page detected; attempting solver retry…');
+      const solverAttempt = await solverClient.solve(pageUrl, { userAgent });
+      if (solverAttempt?.normalizedCookies?.length) {
+        await context.addCookies(solverAttempt.normalizedCookies);
+        navigationResponse = await page.goto(pageUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 90000
+        });
+      }
+
+      const stillChallenged =
+        isCloudflareChallengeUrl(page.url()) || (await isCloudflareChallengeResponse(navigationResponse));
+      if (stillChallenged) {
+        console.warn('[!] Challenge still present after solver attempt; continuing with Playwright workflow.');
+      } else {
+        console.log('[+] Solver cleared the challenge; continuing detection.');
+      }
+    }
 
     const maxDetectionAttempts = Math.max(
       1,
