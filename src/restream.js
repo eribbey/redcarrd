@@ -12,6 +12,10 @@
  * Requirements (install in your container):
  *   npm install playwright
  *   ffmpeg must be available in PATH
+ *
+ * Environment variables:
+ *   RESTREAM_MAX_ATTEMPTS            Max detection retries (default: 4)
+ *   RESTREAM_DETECT_CONFIG_FALLBACK  Enable config fallback detection (default: true; set to 0/false to disable)
  */
 
 const { chromium } = require('playwright');
@@ -132,7 +136,7 @@ async function main() {
     );
     const enableConfigFallback = parseBooleanEnv(
       process.env.RESTREAM_DETECT_CONFIG_FALLBACK,
-      false
+      true
     );
     const reloadBackoffMs = 2000;
     let streamInfo = null;
