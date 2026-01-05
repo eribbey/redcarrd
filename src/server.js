@@ -126,12 +126,40 @@ app.get('/api/logs/stream', (req, res) => {
 
 app.post('/api/config', (req, res) => {
   const { categories, rebuildIntervalMinutes, lifetimeHours, timezone } = req.body;
-  config.categories = Array.isArray(categories) ? categories : config.categories;
-  config.rebuildIntervalMinutes = rebuildIntervalMinutes || config.rebuildIntervalMinutes;
-  config.lifetimeHours = lifetimeHours || config.lifetimeHours;
-  config.timezone = timezone || config.timezone;
-  channelManager.lifetimeHours = config.lifetimeHours;
-  channelManager.timezone = config.timezone;
+
+  // Validate and sanitize input
+  if (categories !== undefined) {
+    if (!Array.isArray(categories)) {
+      return res.status(400).json({ error: 'categories must be an array' });
+    }
+    config.categories = categories;
+  }
+
+  if (rebuildIntervalMinutes !== undefined) {
+    const interval = Number(rebuildIntervalMinutes);
+    if (!Number.isFinite(interval) || interval < 1 || interval > 10080) {
+      return res.status(400).json({ error: 'rebuildIntervalMinutes must be between 1 and 10080' });
+    }
+    config.rebuildIntervalMinutes = interval;
+  }
+
+  if (lifetimeHours !== undefined) {
+    const lifetime = Number(lifetimeHours);
+    if (!Number.isFinite(lifetime) || lifetime < 1 || lifetime > 720) {
+      return res.status(400).json({ error: 'lifetimeHours must be between 1 and 720' });
+    }
+    config.lifetimeHours = lifetime;
+    channelManager.lifetimeHours = lifetime;
+  }
+
+  if (timezone !== undefined) {
+    if (typeof timezone !== 'string' || timezone.length === 0 || timezone.length > 100) {
+      return res.status(400).json({ error: 'timezone must be a non-empty string' });
+    }
+    config.timezone = timezone;
+    channelManager.timezone = timezone;
+  }
+
   saveConfig(config, logger);
   scheduleRebuild();
   res.json({ config });
@@ -290,8 +318,16 @@ app.get('/hls/:id/local/:segment', async (req, res) => {
   }
 
   const requested = decodeURIComponent(req.params.segment || '');
-  const resolved = path.resolve(job.workDir, requested);
+  const normalized = path.normalize(requested);
+  const resolved = path.resolve(job.workDir, normalized);
   if (!resolved.startsWith(job.workDir)) {
+    logger.warn('Path traversal attempt detected', {
+      channelId: req.params.id,
+      requested,
+      normalized,
+      resolved,
+      workDir: job.workDir,
+    });
     return res.status(400).send('Invalid segment path');
   }
 

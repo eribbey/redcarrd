@@ -158,14 +158,18 @@ async function main() {
     page.on('dialog', async (dialog) => {
       try {
         await dialog.dismiss();
-      } catch (_) {}
+      } catch (error) {
+        console.debug('[DEBUG] Failed to dismiss dialog:', error.message);
+      }
     });
 
     // Close popup windows immediately if any slip through
     page.on('popup', async (popup) => {
       try {
         await popup.close();
-      } catch (_) {}
+      } catch (error) {
+        console.debug('[DEBUG] Failed to close popup:', error.message);
+      }
     });
 
     console.log('[+] Navigating to page…');
@@ -328,18 +332,24 @@ async function main() {
   }
 
   // Handle Ctrl+C for clean shutdown
-  process.on('SIGINT', () => {
+  process.on('SIGINT', async () => {
     console.log('\n[!] Caught SIGINT, shutting down…');
     if (ffmpegProc && !ffmpegProc.killed) {
       ffmpegProc.kill('SIGINT');
     }
+    if (browser) {
+      try { await browser.close(); } catch (_) {}
+    }
     process.exit(0);
   });
 
-  process.on('SIGTERM', () => {
+  process.on('SIGTERM', async () => {
     console.log('\n[!] Caught SIGTERM, shutting down…');
     if (ffmpegProc && !ffmpegProc.killed) {
       ffmpegProc.kill('SIGTERM');
+    }
+    if (browser) {
+      try { await browser.close(); } catch (_) {}
     }
     process.exit(0);
   });
@@ -398,8 +408,8 @@ function waitForHlsUrl(page, timeoutMs = 30000, options = {}) {
         } else if (/\.(mp4)(\?|$)/i.test(url)) {
           finish(null, { type: 'progressive', url });
         }
-      } catch (e) {
-        // ignore
+      } catch (error) {
+        console.debug('[DEBUG] Error in request handler:', error.message);
       }
     }
 
@@ -451,8 +461,8 @@ async function detectFromPlayerConfig(page) {
             });
           });
         }
-      } catch (err) {
-        // ignore JWPlayer inspection errors
+      } catch (error) {
+        console.debug('[DEBUG] JWPlayer inspection error:', error.message);
       }
     }
 
@@ -511,12 +521,12 @@ async function autoplayVideo(page) {
               player.setMute(true);
               player.play();
             }
-          } catch (_) {
-            // ignore
+          } catch (error) {
+            console.debug('[DEBUG] Failed to play JWPlayer:', error.message);
           }
         }
-      } catch (_) {
-        // ignore
+      } catch (error) {
+        console.debug('[DEBUG] Error in tryPlay helper:', error.message);
       }
     }
 

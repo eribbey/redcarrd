@@ -67,7 +67,7 @@ async function fetchHtml(url, logger, options = {}) {
   const response = await axios.get(url, {
     headers: mergedHeaders,
     proxy: false,
-    httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
+    httpsAgent: createHttpsAgent(logger),
   });
   logger?.debug('Fetched HTML via axios', { url, length: response.data?.length || 0 });
   return response.data;
@@ -76,6 +76,20 @@ async function fetchHtml(url, logger, options = {}) {
 const BLOCKED_HOSTS = ['google.com', 'www.google.com', 'pagead2.googlesyndication.com'];
 
 const CLOUDFLARE_CHALLENGE_PATTERNS = [/cdn-cgi\/challenge/i, /__cf_chl_captcha_tk__/i];
+
+// SSL verification configuration
+// WARNING: Disabling SSL verification exposes you to MITM attacks
+const DISABLE_SSL_VERIFICATION = process.env.DISABLE_SSL_VERIFICATION === 'true';
+
+function createHttpsAgent(logger) {
+  if (DISABLE_SSL_VERIFICATION && logger) {
+    logger.warn('SSL certificate verification is disabled - this exposes you to MITM attacks', {
+      module: 'scraper',
+      env: 'DISABLE_SSL_VERIFICATION',
+    });
+  }
+  return new https.Agent({ rejectUnauthorized: !DISABLE_SSL_VERIFICATION });
+}
 
 const isCloudflareChallengeUrl = (value = '') =>
   CLOUDFLARE_CHALLENGE_PATTERNS.some((pattern) => pattern.test(value));
@@ -638,7 +652,14 @@ async function fetchRenderedHtml(url, logger, options = {}) {
       }
 
       if (browser) {
-        await browser.close();
+        try {
+          await browser.close();
+        } catch (closeError) {
+          logger?.warn('Failed to close browser context', {
+            url: normalizedUrl,
+            error: closeError.message,
+          });
+        }
       }
     }
   }

@@ -13,6 +13,21 @@ dayjs.extend(utc);
 dayjs.extend(timezone);
 
 const DEFAULT_HYDRATION_CONCURRENCY = 5;
+const MAX_COOKIES_PER_CHANNEL = 50;
+
+// SSL verification configuration
+// WARNING: Disabling SSL verification exposes you to MITM attacks
+const DISABLE_SSL_VERIFICATION = process.env.DISABLE_SSL_VERIFICATION === 'true';
+
+function createHttpsAgent(logger) {
+  if (DISABLE_SSL_VERIFICATION && logger) {
+    logger.warn('SSL certificate verification is disabled - this exposes you to MITM attacks', {
+      module: 'channelManager',
+      env: 'DISABLE_SSL_VERIFICATION',
+    });
+  }
+  return new https.Agent({ rejectUnauthorized: !DISABLE_SSL_VERIFICATION });
+}
 
 class ChannelManager {
   constructor({
@@ -272,7 +287,11 @@ class ChannelManager {
       try {
         headers.Origin = new URL(channel.embedUrl).origin;
       } catch (error) {
-        // ignore
+        this.logger?.debug('Failed to set Origin header from embedUrl', {
+          channelId: channel?.id,
+          embedUrl: channel?.embedUrl,
+          error: error.message,
+        });
       }
     }
 
@@ -304,6 +323,18 @@ class ChannelManager {
       }
     });
 
+    // Enforce maximum cookie limit per channel to prevent unbounded memory growth
+    if (cookieMap.size > MAX_COOKIES_PER_CHANNEL) {
+      this.logger?.warn('Cookie limit exceeded, keeping most recent cookies', {
+        channelId: channel.id,
+        cookieCount: cookieMap.size,
+        limit: MAX_COOKIES_PER_CHANNEL,
+      });
+      const entries = Array.from(cookieMap.entries());
+      cookieMap.clear();
+      entries.slice(-MAX_COOKIES_PER_CHANNEL).forEach(([key, value]) => cookieMap.set(key, value));
+    }
+
     channel.cookies = Array.from(cookieMap.values());
   }
 
@@ -315,8 +346,7 @@ class ChannelManager {
       headers,
       responseType: 'arraybuffer',
       validateStatus: (status) => status >= 200 && status < 500,
-      // Some HLS origins provide certificates that aren't signed by public CAs.
-      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+      httpsAgent: createHttpsAgent(this.logger),
     });
 
     this.updateCookies(channel, response.headers['set-cookie']);

@@ -87,9 +87,20 @@ class Restreamer {
 
       if (child && !child.killed) {
         child.kill('SIGTERM');
+
+        // Wait for exit with timeout
+        await Promise.race([
+          new Promise((resolve) => child.once('exit', resolve)),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+
+        // Force kill if still not dead
+        if (!child.killed) {
+          this.logger?.warn('Child process did not exit after SIGTERM, forcing SIGKILL', { channelId });
+          child.kill('SIGKILL');
+        }
       }
 
-      await new Promise((resolve) => child.once('exit', resolve));
       throw error;
     }
 
