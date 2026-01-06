@@ -72,6 +72,7 @@ function renderChannels() {
     const sourceSelect = node.querySelector('.source');
     const previewLink = node.querySelector('.preview-link');
     const previewPlayer = node.querySelector('.preview-player');
+    const previewActions = node.querySelector('.preview-actions');
 
     fillSelect(sourceSelect, channel.sourceOptions, channel.embedUrl);
 
@@ -100,31 +101,33 @@ function renderChannels() {
       }
     });
 
-    const streamPath = channel.streamUrl ? `/hls/${encodeURIComponent(channel.id)}` : null;
-    if (streamPath) {
-      previewLink.disabled = false;
-      previewLink.textContent = 'Preview stream';
-      previewPlayer?.classList.add('hidden');
-      previewLink.addEventListener('click', (e) => {
-        e.preventDefault();
-        if (previewPlayer.classList.contains('hidden')) {
-          loadPreview(previewPlayer, streamPath);
-          previewPlayer.classList.remove('hidden');
-          previewLink.textContent = 'Hide preview';
-        } else {
-          destroyPreviewPlayer(previewPlayer);
-          previewPlayer.classList.add('hidden');
-          previewLink.textContent = 'Preview stream';
-        }
-      });
-    } else {
-      previewLink.disabled = false;
-      previewLink.textContent = 'Open embed';
-      previewPlayer?.classList.add('hidden');
-      previewLink.addEventListener('click', (e) => {
+    const streamPath = `/hls/${encodeURIComponent(channel.id)}`;
+    previewLink.disabled = false;
+    previewLink.textContent = 'Show stream';
+    previewPlayer?.classList.add('hidden');
+    previewLink.addEventListener('click', (e) => {
+      e.preventDefault();
+      if (previewPlayer.classList.contains('hidden')) {
+        loadPreview(previewPlayer, streamPath);
+        previewPlayer.classList.remove('hidden');
+        previewLink.textContent = 'Hide preview';
+      } else {
+        destroyPreviewPlayer(previewPlayer);
+        previewPlayer.classList.add('hidden');
+        previewLink.textContent = 'Show stream';
+      }
+    });
+
+    if (channel.embedUrl) {
+      const embedLink = document.createElement('button');
+      embedLink.type = 'button';
+      embedLink.className = previewLink.className;
+      embedLink.textContent = 'Open embed';
+      embedLink.addEventListener('click', (e) => {
         e.preventDefault();
         window.open(channel.embedUrl, '_blank', 'noopener');
       });
+      previewActions?.appendChild(embedLink);
     }
 
     container.appendChild(node);
