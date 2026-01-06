@@ -265,9 +265,8 @@ async function main() {
 
     const ffmpegArgs = [
       '-loglevel', 'warning',
-      '-fflags', '+genpts',
-      // Read input in real-time to simulate live rebroadcast
-      '-re',
+      '-fflags', '+genpts+discardcorrupt',
+      '-err_detect', 'ignore_err',
       // Browser-like headers
       '-headers', headersArg,
       '-user_agent', userAgent,
@@ -276,13 +275,18 @@ async function main() {
       // Input
       ...(isDash ? ['-i', streamInfo.url, '-map', '0'] : ['-i', streamInfo.url]),
       // Copy codecs (no re-encode); change to -c:v libx264 -c:a aac if transcoding needed
-      '-c', 'copy',
+      '-c:v', 'copy',
+      '-c:a', 'copy',
+      // Bypass codec issues with AAC streams
+      '-bsf:a', 'aac_adtstoasc',
       // HLS output options
       '-f', 'hls',
-      '-hls_time', '4',                     // seconds per segment
-      '-hls_list_size', '8',                // sliding window size
-      '-hls_flags', 'delete_segments+append_list+program_date_time',
-      '-hls_playlist_type', 'live',
+      '-hls_time', '6',                     // 6 seconds per segment (increased from 4)
+      '-hls_list_size', '12',               // 12 segments = ~72s buffer (increased from 8)
+      '-hls_flags', 'append_list+independent_segments+program_date_time+temp_file',
+      '-hls_delete_threshold', '3',         // Keep extra segments for buffering
+      '-hls_playlist_type', 'event',        // Event type for better seeking/DVR
+      '-hls_segment_type', 'mpegts',
       '-start_number', '0',
       '-hls_segment_filename', segmentFilenamePattern,
       playlistFilename
