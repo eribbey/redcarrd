@@ -17,14 +17,18 @@ const MAX_COOKIES_PER_CHANNEL = 50;
 
 // SSL verification configuration
 // WARNING: Disabling SSL verification exposes you to MITM attacks
-const DISABLE_SSL_VERIFICATION = process.env.DISABLE_SSL_VERIFICATION === 'true';
+// Default: disabled unless explicitly re-enabled via DISABLE_SSL_VERIFICATION=false
+const DISABLE_SSL_VERIFICATION = process.env.DISABLE_SSL_VERIFICATION !== 'false';
 
 function createHttpsAgent(logger) {
   if (DISABLE_SSL_VERIFICATION && logger) {
-    logger.warn('SSL certificate verification is disabled - this exposes you to MITM attacks', {
+    logger.warn(
+      'SSL certificate verification is disabled by default; set DISABLE_SSL_VERIFICATION=false to re-enable strict validation (MITM risk)',
+      {
       module: 'channelManager',
       env: 'DISABLE_SSL_VERIFICATION',
-    });
+      },
+    );
   }
   return new https.Agent({ rejectUnauthorized: !DISABLE_SSL_VERIFICATION });
 }

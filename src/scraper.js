@@ -79,14 +79,18 @@ const CLOUDFLARE_CHALLENGE_PATTERNS = [/cdn-cgi\/challenge/i, /__cf_chl_captcha_
 
 // SSL verification configuration
 // WARNING: Disabling SSL verification exposes you to MITM attacks
-const DISABLE_SSL_VERIFICATION = process.env.DISABLE_SSL_VERIFICATION === 'true';
+// Default: disabled unless explicitly re-enabled via DISABLE_SSL_VERIFICATION=false
+const DISABLE_SSL_VERIFICATION = process.env.DISABLE_SSL_VERIFICATION !== 'false';
 
 function createHttpsAgent(logger) {
   if (DISABLE_SSL_VERIFICATION && logger) {
-    logger.warn('SSL certificate verification is disabled - this exposes you to MITM attacks', {
+    logger.warn(
+      'SSL certificate verification is disabled by default; set DISABLE_SSL_VERIFICATION=false to re-enable strict validation (MITM risk)',
+      {
       module: 'scraper',
       env: 'DISABLE_SSL_VERIFICATION',
-    });
+      },
+    );
   }
   return new https.Agent({ rejectUnauthorized: !DISABLE_SSL_VERIFICATION });
 }
@@ -1298,7 +1302,7 @@ async function fetchMatchesFromApi(baseUrl, endpoint = 'live', logger) {
   const url = `${normalizedBase.replace(/\/$/, '')}/api/matches/${endpoint}`;
 
   const response = await axios.get(url, {
-    httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+    httpsAgent: createHttpsAgent(logger),
     headers: { 'User-Agent': 'redcarrd-scraper/1.0' },
     proxy: false,
   });
@@ -1315,7 +1319,7 @@ async function fetchStreamsForSource(baseUrl, sourceName, sourceId, logger) {
   const url = `${normalizedBase.replace(/\/$/, '')}/api/stream/${sourceName}/${sourceId}`;
 
   const response = await axios.get(url, {
-    httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+    httpsAgent: createHttpsAgent(logger),
     headers: { 'User-Agent': 'redcarrd-scraper/1.0' },
     proxy: false,
   });
