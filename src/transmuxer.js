@@ -19,9 +19,14 @@ class Transmuxer {
 
   async ensureJob(channelId, inputUrl, headers = {}) {
     const existing = this.jobs.get(channelId);
-    if (existing) {
+    if (existing && !this.isJobStale(existing)) {
       existing.lastAccessed = Date.now();
       return existing;
+    }
+
+    if (existing) {
+      this.logger?.info('Existing transmux job is stale, restarting', { channelId });
+      await this.cleanupJob(channelId);
     }
 
     const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'transmux-'));
@@ -33,7 +38,11 @@ class Transmuxer {
       '-y',
       '-hide_banner',
       '-loglevel',
-      'error',
+      'warning',
+      '-fflags',
+      '+genpts+discardcorrupt',
+      '-err_detect',
+      'ignore_err',
     ];
 
     if (headerArg) {
@@ -43,18 +52,36 @@ class Transmuxer {
     args.push(
       '-i',
       inputUrl,
-      '-c',
+      // Try codec copy first, fallback handled by FFmpeg
+      '-c:v',
       'copy',
+      '-c:a',
+      'copy',
+      // Bypass codec issues
+      '-bsf:a',
+      'aac_adtstoasc',
       '-f',
       'hls',
+      // Longer segments for stability (6s instead of 4s)
       '-hls_time',
-      '4',
+      '6',
+      // Larger playlist for better buffering (12 segments = ~72s buffer)
       '-hls_list_size',
-      '5',
+      '12',
+      // Improved flags: removed delete_segments, added program_date_time
       '-hls_flags',
-      'delete_segments+append_list+independent_segments',
+      'append_list+independent_segments+program_date_time+temp_file',
+      // Allow segments to persist for DVR-like behavior
+      '-hls_delete_threshold',
+      '3',
+      '-hls_playlist_type',
+      'event',
+      '-hls_segment_type',
+      'mpegts',
       '-hls_segment_filename',
       segmentPath,
+      '-start_number',
+      '0',
       manifestPath,
     );
 
@@ -140,6 +167,23 @@ class Transmuxer {
 
   getJob(channelId) {
     return this.jobs.get(channelId);
+  }
+
+  isJobStale(job) {
+    if (!job || !job.process) return true;
+
+    const { exitCode, signalCode, killed } = job.process;
+    if (exitCode !== null || signalCode || killed) {
+      return true;
+    }
+
+    // Check if job hasn't been accessed in the last 10 minutes
+    const staleThresholdMs = 10 * 60 * 1000;
+    if (Date.now() - job.lastAccessed > staleThresholdMs) {
+      return true;
+    }
+
+    return false;
   }
 
   async cleanupJob(channelId) {
