@@ -71,34 +71,51 @@ class Transmuxer {
 
     const readyPromise = new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
+        clearPollTimer();
         reject(new Error('Timed out waiting for transmux manifest'));
       }, 15000);
+
+      let pollTimer;
+
+      const clearPollTimer = () => {
+        if (pollTimer) {
+          clearTimeout(pollTimer);
+          pollTimer = null;
+        }
+      };
 
       const checkReady = async () => {
         try {
           const stats = await fs.promises.stat(manifestPath);
           if (stats.size > 0) {
             clearTimeout(timeout);
+            clearPollTimer();
             resolve(true);
             return;
           }
         } catch (error) {
-          // ignore
+          this.logger?.debug('Polling for manifest file failed (will retry)', {
+            channelId,
+            manifestPath,
+            error: error.message,
+          });
         }
 
-        setTimeout(checkReady, 500);
+        pollTimer = setTimeout(checkReady, 500);
       };
 
       checkReady();
 
       child.on('error', (error) => {
         clearTimeout(timeout);
+        clearPollTimer();
         reject(error);
       });
 
       child.on('exit', (code, signal) => {
         if (code !== 0) {
           clearTimeout(timeout);
+          clearPollTimer();
           reject(new Error(`ffmpeg exited with code ${code || signal}`));
         }
       });

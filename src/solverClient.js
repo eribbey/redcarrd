@@ -1,4 +1,19 @@
 const axios = require('axios');
+const https = require('https');
+
+// SSL verification configuration
+// WARNING: Disabling SSL verification exposes you to MITM attacks
+const DISABLE_SSL_VERIFICATION = process.env.DISABLE_SSL_VERIFICATION === 'true';
+
+function createHttpsAgent(logger) {
+  if (DISABLE_SSL_VERIFICATION && logger) {
+    logger.warn('SSL certificate verification is disabled - this exposes you to MITM attacks', {
+      module: 'solverClient',
+      env: 'DISABLE_SSL_VERIFICATION',
+    });
+  }
+  return new https.Agent({ rejectUnauthorized: !DISABLE_SSL_VERIFICATION });
+}
 
 function parseBooleanEnv(value, defaultValue = false) {
   if (value === undefined) return defaultValue;
@@ -72,7 +87,7 @@ class SolverClient {
         headers: payloadHeaders,
         timeout: this.maxTimeout,
         proxy: false,
-        httpsAgent: new (require('https').Agent)({ rejectUnauthorized: false }),
+        httpsAgent: createHttpsAgent(this.logger),
       });
 
       return this.normalizeResponse(response.data, url);
