@@ -254,12 +254,21 @@ async function serveTransmuxedManifest(req, res, channel) {
       res.set('Content-Type', 'application/vnd.apple.mpegurl');
       return res.send(rewritten);
     } catch (error) {
+      // Fetch FFmpeg process metrics if available
+      const job = channelManager.streamManager.jobs.get(channel.id);
+      const ffmpegMetrics = job?.ffmpegProcess?.getMetrics?.();
+
       logger.error('Failed to serve restreamed manifest', {
         channelId: channel?.id,
-        targetUrl: channel?.embedUrl,
-        message: error.message,
+        embedUrl: channel?.embedUrl,
+        error: error.message,
+        stack: error.stack,
         exitCode: error.exitCode,
         signal: error.signal,
+        ffmpegState: ffmpegMetrics?.state,
+        ffmpegPid: ffmpegMetrics?.pid,
+        ffmpegUptime: ffmpegMetrics?.uptime,
+        recentErrors: ffmpegMetrics?.recentErrors?.slice(-3),
       });
       const detail = error?.message ? `: ${error.message}` : '';
       return res.status(502).send(`Failed to restream embed${detail}`);

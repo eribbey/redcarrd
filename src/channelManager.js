@@ -6,8 +6,7 @@ const axios = require('axios');
 const crypto = require('crypto');
 const https = require('https');
 const { createProgrammeFromEvent, buildDefaultStreamHeaders } = require('./scraper');
-const Transmuxer = require('./transmuxer');
-const Restreamer = require('./restreamer');
+const StreamManager = require('./streaming/StreamManager');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -50,10 +49,10 @@ class ChannelManager {
     this.hydrationConcurrency = Math.max(1, hydrationConcurrency || DEFAULT_HYDRATION_CONCURRENCY);
     this.playlistReady = false;
     this.hydrationInProgress = false;
-    this.transmuxer = new Transmuxer({ logger });
-    this.transmuxJobs = new Map();
-    this.restreamer = new Restreamer({ logger });
-    this.restreamJobs = new Map();
+    this.streamManager = new StreamManager({
+      logger,
+      maxConcurrent: hydrationConcurrency * 2,
+    });
   }
 
   async buildChannels(events, selectedCategories = []) {
@@ -400,47 +399,52 @@ class ChannelManager {
   }
 
   async ensureTransmuxed(channel) {
+    // Note: Direct stream URL transmuxing without browser automation
+    // is not yet supported in StreamManager. For now, this returns null
+    // and will be enhanced in future updates.
     if (!channel?.streamUrl) return null;
-    const headers = this.buildStreamHeaders(channel);
-    const job = await this.transmuxer.ensureJob(channel.id, channel.streamUrl, headers);
-    this.transmuxJobs.set(channel.id, job);
-    this.logger?.info('Transmux job ready for channel', { channelId: channel.id, workDir: job.workDir });
-    return job;
+    this.logger?.warn('Direct stream URL transmuxing not yet supported in new StreamManager', {
+      channelId: channel.id,
+    });
+    return null;
   }
 
   async ensureRestreamed(channel) {
     if (!channel?.embedUrl) return null;
-    const existing = this.restreamer.getJob(channel.id);
+
+    // Check if embedUrl changed and cleanup old job
+    const existing = this.streamManager.jobs.get(channel.id);
     if (existing && existing.embedUrl !== channel.embedUrl) {
-      await this.restreamer.cleanupJob(channel.id);
-      this.restreamJobs.delete(channel.id);
+      this.logger?.info('Embed URL changed, cleaning up old job', {
+        channelId: channel.id,
+        oldUrl: existing.embedUrl,
+        newUrl: channel.embedUrl,
+      });
+      await this.streamManager.cleanupJob(channel.id);
     }
 
-    const job = await this.restreamer.ensureJob(channel.id, channel.embedUrl);
-    if (job) this.restreamJobs.set(channel.id, job);
+    const job = await this.streamManager.ensureJob(channel.id, channel.embedUrl, {
+      maxAttempts: parseInt(process.env.RESTREAM_MAX_ATTEMPTS) || 4,
+      enableConfigFallback: process.env.RESTREAM_DETECT_CONFIG_FALLBACK !== 'false',
+    });
+
     return job;
   }
 
   getTransmuxJob(channelId) {
-    return (
-      this.transmuxer.getJob(channelId) ||
-      this.transmuxJobs.get(channelId) ||
-      this.restreamer.getJob(channelId) ||
-      this.restreamJobs.get(channelId) ||
-      null
-    );
+    return this.streamManager.jobs.get(channelId) || null;
   }
 
   async cleanupTransmuxJobs(ids = []) {
     if (!ids.length) return;
-    this.logger?.info('Evicting transmux jobs', { channelIds: ids });
-    await Promise.all(ids.map((id) => this.transmuxer.cleanupJob(id)));
+    this.logger?.info('Evicting stream jobs', { channelIds: ids });
+    await Promise.all(ids.map((id) => this.streamManager.cleanupJob(id)));
   }
 
   async cleanupRestreamJobs(ids = []) {
     if (!ids.length) return;
-    this.logger?.info('Evicting restream jobs', { channelIds: ids });
-    await Promise.all(ids.map((id) => this.restreamer.cleanupJob(id)));
+    this.logger?.info('Evicting stream jobs', { channelIds: ids });
+    await Promise.all(ids.map((id) => this.streamManager.cleanupJob(id)));
   }
 }
 
