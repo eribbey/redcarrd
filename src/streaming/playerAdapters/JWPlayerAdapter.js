@@ -53,35 +53,111 @@ class JWPlayerAdapter {
         }
       }
 
-      if (player && typeof player.getPlaylist === 'function') {
-        const playlist = player.getPlaylist() || [];
+      if (player) {
         const candidates = [];
 
-        for (const item of playlist) {
-          if (item.file) {
-            const candidate = normalizeCandidate(item.file, item.type);
-            if (candidate) {
-              candidates.push(candidate);
+        // Method 1: getPlaylist()
+        if (typeof player.getPlaylist === 'function') {
+          const playlist = player.getPlaylist() || [];
+          for (const item of playlist) {
+            if (item.file) {
+              const candidate = normalizeCandidate(item.file, item.type);
+              if (candidate) candidates.push(candidate);
             }
-          }
 
-          const sources = item.sources || [];
-          for (const source of sources) {
-            if (source.file) {
-              const candidate = normalizeCandidate(source.file, source.type);
-              if (candidate) {
-                candidates.push(candidate);
+            const sources = item.sources || [];
+            for (const source of sources) {
+              if (source.file) {
+                const candidate = normalizeCandidate(source.file, source.type);
+                if (candidate) candidates.push(candidate);
               }
             }
           }
         }
 
+        // Method 2: getPlaylistItem() - current item
+        if (typeof player.getPlaylistItem === 'function') {
+          try {
+            const currentItem = player.getPlaylistItem();
+            if (currentItem) {
+              if (currentItem.file) {
+                const candidate = normalizeCandidate(currentItem.file, currentItem.type);
+                if (candidate) candidates.push(candidate);
+              }
+              const sources = currentItem.sources || [];
+              for (const source of sources) {
+                if (source.file) {
+                  const candidate = normalizeCandidate(source.file, source.type);
+                  if (candidate) candidates.push(candidate);
+                }
+              }
+            }
+          } catch (error) {
+            console.debug('[JWPlayerAdapter] getPlaylistItem failed');
+          }
+        }
+
+        // Method 3: getConfig().sources
+        if (typeof player.getConfig === 'function') {
+          try {
+            const config = player.getConfig();
+            if (config) {
+              // Check config.sources directly
+              if (config.sources && Array.isArray(config.sources)) {
+                for (const source of config.sources) {
+                  if (source.file) {
+                    const candidate = normalizeCandidate(source.file, source.type);
+                    if (candidate) candidates.push(candidate);
+                  }
+                }
+              }
+              // Check config.file directly
+              if (config.file) {
+                const candidate = normalizeCandidate(config.file, config.type);
+                if (candidate) candidates.push(candidate);
+              }
+              // Check config.playlist
+              if (config.playlist && Array.isArray(config.playlist)) {
+                for (const item of config.playlist) {
+                  if (item.file) {
+                    const candidate = normalizeCandidate(item.file, item.type);
+                    if (candidate) candidates.push(candidate);
+                  }
+                  if (item.sources && Array.isArray(item.sources)) {
+                    for (const source of item.sources) {
+                      if (source.file) {
+                        const candidate = normalizeCandidate(source.file, source.type);
+                        if (candidate) candidates.push(candidate);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          } catch (error) {
+            console.debug('[JWPlayerAdapter] getConfig failed');
+          }
+        }
+
+        // Method 4: Check video element src directly
+        const jwContainer = document.querySelector('.jwplayer, [id^="jwplayer"], [id^="vplayer"]');
+        if (jwContainer) {
+          const video = jwContainer.querySelector('video');
+          if (video && (video.src || video.currentSrc)) {
+            const src = video.currentSrc || video.src;
+            const candidate = normalizeCandidate(src);
+            if (candidate) candidates.push(candidate);
+          }
+        }
+
+        // Return first non-progressive candidate
         const nonProgressiveCandidate = candidates.find(c => c.type !== 'progressive');
         if (nonProgressiveCandidate) {
-          console.debug('[JWPlayerAdapter] Detected from playlist:', nonProgressiveCandidate);
+          console.debug('[JWPlayerAdapter] Detected:', nonProgressiveCandidate);
           return nonProgressiveCandidate;
         }
 
+        // Fallback to progressive
         if (candidates.length > 0) {
           console.debug('[JWPlayerAdapter] Found progressive fallback:', candidates[0]);
           return candidates[0];

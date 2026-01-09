@@ -1,6 +1,10 @@
 /**
  * Network-based stream detector using Playwright request interception
  * Detects HLS, DASH, and progressive streams via network sniffing
+ *
+ * NOTE: This detector uses simple URL pattern matching without response validation
+ * because request interception is not enabled. This matches the behavior of the
+ * working restream.js implementation.
  */
 class NetworkDetector {
   constructor({ logger }) {
@@ -8,94 +12,114 @@ class NetworkDetector {
     this.streamCandidates = new Map();
   }
 
-  async sniff(page, timeout = 90000) {
+  async sniff(page, timeout = 15000) {
     this.streamCandidates.clear();
+    let listenerRemoved = false;
+    let resolved = false;
 
     return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        if (!listenerRemoved) {
+          listenerRemoved = true;
+          page.off('request', onRequest);
+          this.logger?.debug('Network detector listener cleaned up');
+        }
+      };
+
       const timer = setTimeout(() => {
+        cleanup();
+
+        if (resolved) return;
+
         this.logger?.debug('Network sniffing timeout, selecting best candidate', {
           candidateCount: this.streamCandidates.size,
         });
+
         const best = this.selectBestCandidate();
         if (best) {
+          resolved = true;
           resolve(best);
         } else {
+          resolved = true;
           reject(new Error('No stream detected via network sniffing'));
         }
       }, timeout);
 
-      const onRequest = async (request) => {
+      // Use synchronous handler - no async/await, no response validation
+      const onRequest = (request) => {
+        if (resolved) return;
+
         try {
           const url = request.url();
           const resourceType = request.resourceType();
 
+          // URL pattern matching only - no response header validation
           const patterns = [
             { regex: /playlist\.m3u8/i, type: 'hls', priority: 11 },
+            { regex: /master\.m3u8/i, type: 'hls', priority: 11 },
+            { regex: /index\.m3u8/i, type: 'hls', priority: 10 },
             { regex: /\.m3u8(\?|$)/i, type: 'hls', priority: 10 },
             { regex: /chunklist.*\.m3u8/i, type: 'hls', priority: 8 },
             { regex: /manifest\.mpd/i, type: 'dash', priority: 10 },
             { regex: /\.mpd(\?|$)/i, type: 'dash', priority: 9 },
             { regex: /\.mp4(\?|$)/i, type: 'progressive', priority: 3 },
-            { regex: /\.ts(\?|$)/i, type: 'hls-segment', priority: 1 },
           ];
 
           for (const { regex, type, priority } of patterns) {
             if (regex.test(url)) {
-              if (type === 'hls-segment') {
+              // Skip .ts segment files - we want the manifest
+              if (/\.ts(\?|$)/i.test(url)) {
                 continue;
               }
 
-              try {
-                const response = await request.response();
-                if (response) {
-                  const contentType = response.headers()['content-type'] || '';
-                  const isValidType = this.validateContentType(contentType, type);
+              // Store candidate
+              this.streamCandidates.set(url, {
+                url,
+                type,
+                priority,
+                resourceType,
+                timestamp: Date.now(),
+              });
 
-                  if (isValidType || resourceType === 'media' || resourceType === 'xhr' || resourceType === 'fetch') {
-                    this.streamCandidates.set(url, {
-                      url,
-                      type,
-                      priority,
-                      contentType,
-                      resourceType,
-                      timestamp: Date.now(),
-                    });
+              this.logger?.debug('Stream candidate detected', {
+                url: url.substring(0, 100) + (url.length > 100 ? '...' : ''),
+                type,
+                priority,
+                resourceType,
+              });
 
-                    this.logger?.debug('Stream candidate detected', {
-                      url,
-                      type,
-                      priority,
-                      contentType,
-                      resourceType,
-                    });
-
-                    if (priority >= 10 && type !== 'progressive') {
-                      this.logger?.info('High-priority stream detected, resolving immediately', {
-                        url,
-                        type,
-                        priority,
-                      });
-                      clearTimeout(timer);
-                      page.off('request', onRequest);
-                      resolve({ url, type });
-                      return;
-                    }
-                  }
-                }
-              } catch (error) {
-                this.streamCandidates.set(url, {
-                  url,
-                  type,
-                  priority,
-                  timestamp: Date.now(),
-                });
-
-                this.logger?.debug('Stream candidate detected (no response validation)', {
-                  url,
+              // Immediately resolve for high-priority HLS streams
+              if (priority >= 10 && type === 'hls') {
+                this.logger?.info('High-priority HLS stream detected, resolving immediately', {
+                  url: url.substring(0, 100) + (url.length > 100 ? '...' : ''),
                   type,
                   priority,
                 });
+
+                clearTimeout(timer);
+                cleanup();
+                resolved = true;
+                resolve({ url, type });
+                return;
               }
+
+              // For DASH, also resolve immediately
+              if (priority >= 9 && type === 'dash') {
+                this.logger?.info('High-priority DASH stream detected, resolving immediately', {
+                  url: url.substring(0, 100) + (url.length > 100 ? '...' : ''),
+                  type,
+                  priority,
+                });
+
+                clearTimeout(timer);
+                cleanup();
+                resolved = true;
+                resolve({ url, type });
+                return;
+              }
+
+              // Found a match, break pattern loop
+              break;
             }
           }
         } catch (error) {
@@ -104,27 +128,7 @@ class NetworkDetector {
       };
 
       page.on('request', onRequest);
-
-      const cleanup = () => {
-        clearTimeout(timer);
-        page.off('request', onRequest);
-      };
-
-      timer.unref = cleanup;
     });
-  }
-
-  validateContentType(contentType, expectedType) {
-    const lowerContentType = contentType.toLowerCase();
-
-    const typeMap = {
-      hls: ['application/vnd.apple.mpegurl', 'application/x-mpegurl', 'video/mp2t', 'audio/mpegurl'],
-      dash: ['application/dash+xml'],
-      progressive: ['video/mp4', 'video/webm', 'video/ogg'],
-    };
-
-    const validTypes = typeMap[expectedType] || [];
-    return validTypes.some(t => lowerContentType.includes(t));
   }
 
   selectBestCandidate() {
@@ -133,6 +137,7 @@ class NetworkDetector {
       return null;
     }
 
+    // Prefer HLS/DASH over progressive
     const sorted = Array.from(this.streamCandidates.values())
       .filter(c => c.type !== 'progressive')
       .sort((a, b) => {
@@ -141,6 +146,7 @@ class NetworkDetector {
       });
 
     if (sorted.length === 0) {
+      // Fallback to progressive
       const progressiveSorted = Array.from(this.streamCandidates.values())
         .filter(c => c.type === 'progressive')
         .sort((a, b) => a.timestamp - b.timestamp);
@@ -148,7 +154,7 @@ class NetworkDetector {
       if (progressiveSorted.length > 0) {
         const best = progressiveSorted[0];
         this.logger?.debug('Selected progressive stream (fallback)', {
-          url: best.url,
+          url: best.url.substring(0, 100),
           type: best.type,
           priority: best.priority,
         });
@@ -160,7 +166,7 @@ class NetworkDetector {
 
     const best = sorted[0];
     this.logger?.info('Selected best stream candidate', {
-      url: best.url,
+      url: best.url.substring(0, 100) + (best.url.length > 100 ? '...' : ''),
       type: best.type,
       priority: best.priority,
       totalCandidates: this.streamCandidates.size,

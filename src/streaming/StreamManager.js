@@ -21,6 +21,9 @@ const PLAYWRIGHT_LAUNCH_ARGS = [
   '--disable-dev-shm-usage',
   '--disable-blink-features=AutomationControlled',
   '--disable-features=IsolateOrigins,site-per-process',
+  '--autoplay-policy=no-user-gesture-required',
+  '--disable-notifications',
+  '--mute-audio',
 ];
 
 /**
@@ -103,9 +106,25 @@ class StreamManager {
     let streamInfo = null;
 
     try {
-      ({ browser, context, page } = await this.launchBrowser(embedUrl));
+      // 1. Launch browser WITHOUT navigating yet
+      ({ browser, context, page } = await this.launchBrowserWithoutNavigation());
 
-      streamInfo = await this.detectStream(page, embedUrl, options);
+      // 2. Set up network detector BEFORE navigation to catch initial HLS requests
+      const networkDetectionTimeout = 15000;
+      const networkPromise = this.detector.networkDetector.sniff(page, networkDetectionTimeout);
+
+      // 3. NOW navigate to the embed URL
+      this.logger?.debug('Navigating to embed URL', { embedUrl });
+      await page.goto(embedUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 90000,
+      });
+
+      // 4. Trigger autoplay to start stream loading
+      await this.autoplay(page);
+
+      // 5. Wait for network detection or fall back to player config
+      streamInfo = await this.detectStreamWithNetworkFirst(page, networkPromise, options);
 
       this.logger?.info('Stream detected, starting FFmpeg', {
         channelId,
@@ -172,8 +191,8 @@ class StreamManager {
     }
   }
 
-  async launchBrowser(embedUrl) {
-    this.logger?.debug('Launching Chromium browser', { embedUrl });
+  async launchBrowserWithoutNavigation() {
+    this.logger?.debug('Launching Chromium browser');
 
     const browser = await chromium.launch({
       headless: true,
@@ -206,14 +225,43 @@ class StreamManager {
     page.on('dialog', dialog => dialog.dismiss().catch(() => {}));
     page.on('popup', popup => popup.close().catch(() => {}));
 
-    this.logger?.debug('Navigating to embed URL', { embedUrl });
-
-    await page.goto(embedUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: 90000,
-    });
-
     return { browser, context, page };
+  }
+
+  async detectStreamWithNetworkFirst(page, networkPromise, options = {}) {
+    const enableConfigFallback = options.enableConfigFallback !== false;
+
+    // Wait for network detection (it already has its own timeout)
+    try {
+      const result = await networkPromise;
+
+      if (result) {
+        this.logger?.info('Stream detected via network sniffing', {
+          url: result.url,
+          type: result.type,
+        });
+        return result;
+      }
+    } catch (error) {
+      this.logger?.debug('Network detection timed out or failed', { error: error.message });
+    }
+
+    // Fallback to player config detection - player should be ready by now
+    if (enableConfigFallback) {
+      this.logger?.debug('Trying player config fallback');
+      const configResult = await this.detector.playerDetector.inspect(page);
+
+      if (configResult) {
+        this.logger?.info('Stream detected via player config', {
+          url: configResult.url,
+          type: configResult.type,
+          player: configResult.player,
+        });
+        return configResult;
+      }
+    }
+
+    throw new Error('No stream detected via network or player config');
   }
 
   async detectStream(page, embedUrl, options = {}) {
