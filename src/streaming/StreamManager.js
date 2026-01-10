@@ -1,65 +1,44 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { chromium } = require('playwright');
-const FFmpegProcessManager = require('./FFmpegProcessManager');
-const StreamDetector = require('./StreamDetector');
-
-const JPlayerAdapter = require('./playerAdapters/JPlayerAdapter');
-const JWPlayerAdapter = require('./playerAdapters/JWPlayerAdapter');
-const HTML5VideoAdapter = require('./playerAdapters/HTML5VideoAdapter');
-const VideoJSAdapter = require('./playerAdapters/VideoJSAdapter');
-const FlowplayerAdapter = require('./playerAdapters/FlowplayerAdapter');
-const ClapprAdapter = require('./playerAdapters/ClapprAdapter');
-const BitmovinAdapter = require('./playerAdapters/BitmovinAdapter');
-
-const DEFAULT_STREAM_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
-
-const PLAYWRIGHT_LAUNCH_ARGS = [
-  '--no-sandbox',
-  '--disable-setuid-sandbox',
-  '--disable-dev-shm-usage',
-  '--disable-blink-features=AutomationControlled',
-  '--disable-features=IsolateOrigins,site-per-process',
-  '--autoplay-policy=no-user-gesture-required',
-  '--disable-notifications',
-  '--mute-audio',
-];
+const StreamPipeline = require('./StreamPipeline');
 
 /**
- * Unified stream manager replacing both restreamer.js and transmuxer.js
- * Handles browser automation, stream detection, and FFmpeg process management
+ * Unified stream manager for browser-based video capture to HLS
+ *
+ * This replaces the previous detection-based approach with direct video capture
+ * using CDP screencast. The browser stays open during streaming and captures
+ * whatever video is displayed on the page.
  */
 class StreamManager {
-  constructor({ logger, tempRoot = os.tmpdir(), maxConcurrent = 20 }) {
+  constructor({ logger, tempRoot = os.tmpdir(), maxConcurrent = 10 }) {
     this.logger = logger;
     this.tempRoot = tempRoot;
     this.jobs = new Map();
     this.dependencyCheckPromise = null;
 
-    this.ffmpegManager = new FFmpegProcessManager({
+    this.pipeline = new StreamPipeline({
       logger,
-      maxConcurrent: maxConcurrent || parseInt(process.env.FFMPEG_MAX_CONCURRENT) || 20,
+      tempRoot,
+      maxConcurrent: maxConcurrent || parseInt(process.env.FFMPEG_MAX_CONCURRENT) || 10,
     });
 
-    const playerAdapters = [
-      new JPlayerAdapter(),
-      new JWPlayerAdapter(),
-      new VideoJSAdapter(),
-      new FlowplayerAdapter(),
-      new ClapprAdapter(),
-      new BitmovinAdapter(),
-      new HTML5VideoAdapter(),
-    ];
-
-    this.detector = new StreamDetector({
-      logger,
-      adapters: playerAdapters,
+    // Forward pipeline events
+    this.pipeline.on('started', (data) => {
+      this.logger?.info('Stream capture started', data);
     });
 
-    this.logger?.info('StreamManager initialized', {
+    this.pipeline.on('stopped', (data) => {
+      this.logger?.info('Stream capture stopped', data);
+    });
+
+    this.pipeline.on('error', (data) => {
+      this.logger?.error('Stream capture error', data);
+    });
+
+    this.logger?.info('StreamManager initialized (capture mode)', {
       maxConcurrent,
-      adapterCount: playerAdapters.length,
+      tempRoot,
     });
   }
 
@@ -71,304 +50,81 @@ class StreamManager {
 
     await this.ensureDependencies();
 
+    // Check for existing running job
     const existing = this.jobs.get(channelId);
-    if (existing && !this.isJobStale(existing)) {
-      this.logger?.debug('Reusing existing stream job', { channelId });
-      existing.lastAccessed = Date.now();
-      return existing;
+    if (existing && this.pipeline.isJobRunning(channelId)) {
+      // Check if embed URL changed
+      if (existing.embedUrl !== embedUrl) {
+        this.logger?.info('Embed URL changed, restarting job', {
+          channelId,
+          oldUrl: existing.embedUrl,
+          newUrl: embedUrl,
+        });
+        await this.cleanupJob(channelId);
+      } else {
+        this.logger?.debug('Reusing existing stream job', { channelId });
+        existing.lastAccessed = Date.now();
+        return existing;
+      }
     }
 
-    if (existing) {
+    // Clean up stale job if exists
+    if (existing && !this.pipeline.isJobRunning(channelId)) {
       this.logger?.warn('Existing stream job is stale, restarting', { channelId });
       await this.cleanupJob(channelId);
     }
 
+    // Create new job
     const job = await this.createJob(channelId, embedUrl, options);
     this.jobs.set(channelId, job);
     return job;
   }
 
   async createJob(channelId, embedUrl, options = {}) {
-    const workDir = await fs.promises.mkdtemp(
-      path.join(this.tempRoot, 'stream-')
-    );
-    const manifestPath = path.join(workDir, `${channelId}.m3u8`);
-
     this.logger?.info('Creating stream job', {
       channelId,
       embedUrl,
-      workDir,
     });
 
-    let browser = null;
-    let context = null;
-    let page = null;
-    let streamInfo = null;
-
     try {
-      // 1. Launch browser WITHOUT navigating yet
-      ({ browser, context, page } = await this.launchBrowserWithoutNavigation());
-
-      // 2. Set up network detector BEFORE navigation to catch initial HLS requests
-      const networkDetectionTimeout = 15000;
-      const networkPromise = this.detector.networkDetector.sniff(page, networkDetectionTimeout);
-
-      // 3. NOW navigate to the embed URL
-      this.logger?.debug('Navigating to embed URL', { embedUrl });
-      await page.goto(embedUrl, {
-        waitUntil: 'domcontentloaded',
-        timeout: 90000,
-      });
-
-      // 4. Trigger autoplay to start stream loading
-      await this.autoplay(page);
-
-      // 5. Wait for network detection or fall back to player config
-      streamInfo = await this.detectStreamWithNetworkFirst(page, networkPromise, options);
-
-      this.logger?.info('Stream detected, starting FFmpeg', {
-        channelId,
-        type: streamInfo.type,
-        url: streamInfo.url,
-      });
-
-      const cookies = await context.cookies(streamInfo.url).catch(() => []);
-      const headers = {
-        'Referer': embedUrl,
-        'Cookie': cookies.map(c => `${c.name}=${c.value}`).join('; '),
-        'User-Agent': DEFAULT_STREAM_UA,
-      };
-
-      const ffmpegProcess = await this.ffmpegManager.spawn(
-        channelId,
-        streamInfo.url,
-        manifestPath,
-        { headers, streamType: streamInfo.type }
-      );
-
-      await browser.close();
-      browser = null;
-      context = null;
-      page = null;
+      // Start the capture pipeline
+      const pipelineJob = await this.pipeline.start(channelId, embedUrl, options);
 
       const job = {
         channelId,
         embedUrl,
-        streamUrl: streamInfo.url,
-        streamType: streamInfo.type,
-        workDir,
-        manifestPath,
-        ffmpegProcess,
-        process: ffmpegProcess.process,
+        workDir: pipelineJob.workDir,
+        manifestPath: pipelineJob.manifestPath,
+        pipelineJob,
+        ffmpegProcess: pipelineJob.ffmpegProcess,
+        process: pipelineJob.ffmpegProcess?.process,
         createdAt: Date.now(),
         lastAccessed: Date.now(),
       };
 
       this.logger?.info('Stream job created successfully', {
         channelId,
-        manifestPath,
-        streamType: streamInfo.type,
+        manifestPath: job.manifestPath,
       });
 
       return job;
     } catch (error) {
-      if (browser) {
-        await browser.close().catch(() => {});
-      }
-
-      if (workDir) {
-        await fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {});
-      }
-
       this.logger?.error('Failed to create stream job', {
         channelId,
         embedUrl,
         error: error.message,
         stack: error.stack,
       });
-
       throw error;
     }
   }
 
-  async launchBrowserWithoutNavigation() {
-    this.logger?.debug('Launching Chromium browser');
-
-    const browser = await chromium.launch({
-      headless: true,
-      args: PLAYWRIGHT_LAUNCH_ARGS,
-    });
-
-    const context = await browser.newContext({
-      userAgent: DEFAULT_STREAM_UA,
-      viewport: { width: 1920, height: 1080 },
-      ignoreHTTPSErrors: true,
-      bypassCSP: true,
-    });
-
-    await context.addInitScript(() => {
-      window.open = () => null;
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4] });
-      window.chrome = window.chrome || { runtime: {} };
-      const originalQuery = window.navigator.permissions?.query;
-      if (originalQuery) {
-        window.navigator.permissions.query = (parameters) =>
-          parameters?.name === 'notifications'
-            ? Promise.resolve({ state: 'denied' })
-            : originalQuery(parameters);
-      }
-    });
-
-    const page = await context.newPage();
-    page.on('dialog', dialog => dialog.dismiss().catch(() => {}));
-    page.on('popup', popup => popup.close().catch(() => {}));
-
-    return { browser, context, page };
-  }
-
-  async detectStreamWithNetworkFirst(page, networkPromise, options = {}) {
-    const enableConfigFallback = options.enableConfigFallback !== false;
-
-    // Wait for network detection (it already has its own timeout)
-    try {
-      const result = await networkPromise;
-
-      if (result) {
-        this.logger?.info('Stream detected via network sniffing', {
-          url: result.url,
-          type: result.type,
-        });
-        return result;
-      }
-    } catch (error) {
-      this.logger?.debug('Network detection timed out or failed', { error: error.message });
-    }
-
-    // Fallback to player config detection - player should be ready by now
-    if (enableConfigFallback) {
-      this.logger?.debug('Trying player config fallback');
-      const configResult = await this.detector.playerDetector.inspect(page);
-
-      if (configResult) {
-        this.logger?.info('Stream detected via player config', {
-          url: configResult.url,
-          type: configResult.type,
-          player: configResult.player,
-        });
-        return configResult;
-      }
-    }
-
-    throw new Error('No stream detected via network or player config');
-  }
-
-  async detectStream(page, embedUrl, options = {}) {
-    const maxAttempts = options.maxAttempts || parseInt(process.env.RESTREAM_MAX_ATTEMPTS) || 4;
-    const enableConfigFallback = options.enableConfigFallback !== false;
-    let lastError = null;
-
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        if (attempt > 1) {
-          this.logger?.warn('Retrying stream detection', {
-            attempt,
-            maxAttempts,
-            embedUrl,
-          });
-          await page.waitForTimeout(2000 * attempt);
-          await page.reload({ waitUntil: 'domcontentloaded', timeout: 90000 });
-        }
-
-        await this.autoplay(page);
-
-        const streamInfo = await this.detector.detect(page, {
-          enableConfigFallback,
-        });
-
-        if (streamInfo) {
-          this.logger?.info('Stream detection successful', {
-            attempt,
-            url: streamInfo.url,
-            type: streamInfo.type,
-            player: streamInfo.player,
-          });
-          return streamInfo;
-        }
-      } catch (error) {
-        lastError = error;
-        this.logger?.debug('Detection attempt failed', {
-          attempt,
-          error: error.message,
-        });
-      }
-    }
-
-    throw lastError || new Error('Stream detection failed after retries');
-  }
-
-  async autoplay(page) {
-    await page.waitForTimeout(2000);
-
-    await page.evaluate(() => {
-      function tryPlay() {
-        try {
-          const video = document.querySelector('video');
-          if (video) {
-            video.muted = true;
-            const p = video.play();
-            if (p && p.catch) p.catch(() => {});
-          }
-
-          const audio = document.querySelector('audio');
-          if (audio) {
-            audio.muted = true;
-            const p = audio.play();
-            if (p && p.catch) p.catch(() => {});
-          }
-
-          if (typeof window.jwplayer === 'function') {
-            try {
-              let player = window.jwplayer();
-              if (!player) {
-                const jwElem = document.querySelector('.jwplayer, [id^="jwplayer"], [id^="vplayer"]');
-                if (jwElem) player = window.jwplayer(jwElem);
-              }
-              if (player) {
-                player.setMute(true);
-                player.play();
-              }
-            } catch (error) {}
-          }
-
-          if (typeof videojs !== 'undefined') {
-            const players = videojs.players || {};
-            for (const id in players) {
-              try {
-                players[id].muted(true);
-                players[id].play();
-              } catch (error) {}
-            }
-          }
-        } catch (error) {}
-      }
-
-      tryPlay();
-      document.body.addEventListener('click', tryPlay, { once: true });
-      document.body.addEventListener('keydown', tryPlay, { once: true });
-    });
-
-    await page.waitForTimeout(5000);
-  }
-
   isJobStale(job) {
-    if (!job?.ffmpegProcess) {
+    if (!job?.pipelineJob) {
       return true;
     }
 
-    const metrics = job.ffmpegProcess.getMetrics();
-    return metrics.state === 'crashed' || metrics.state === 'killed';
+    return !this.pipeline.isJobRunning(job.channelId);
   }
 
   async cleanupJob(channelId) {
@@ -383,25 +139,8 @@ class StreamManager {
       workDir: job.workDir,
     });
 
-    if (job.ffmpegProcess) {
-      await this.ffmpegManager.kill(channelId);
-    }
-
-    if (job.workDir) {
-      try {
-        await fs.promises.rm(job.workDir, { recursive: true, force: true });
-        this.logger?.debug('Removed work directory', {
-          channelId,
-          workDir: job.workDir,
-        });
-      } catch (error) {
-        this.logger?.warn('Failed to cleanup stream job directory', {
-          channelId,
-          workDir: job.workDir,
-          error: error.message,
-        });
-      }
-    }
+    // Stop the pipeline (this handles browser, FFmpeg, and file cleanup)
+    await this.pipeline.stop(channelId);
 
     this.jobs.delete(channelId);
   }
@@ -453,6 +192,7 @@ class StreamManager {
 
   async checkPlaywrightLaunchable() {
     try {
+      const { chromium } = require('playwright');
       const browser = await chromium.launch({
         headless: true,
         args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -464,21 +204,26 @@ class StreamManager {
   }
 
   getMetrics() {
-    const ffmpegMetrics = this.ffmpegManager.getMetrics();
+    const pipelineMetrics = this.pipeline.getMetrics();
 
     return {
       jobCount: this.jobs.size,
-      ffmpeg: ffmpegMetrics,
-      jobs: Array.from(this.jobs.values()).map(job => ({
+      pipeline: pipelineMetrics,
+      jobs: Array.from(this.jobs.values()).map((job) => ({
         channelId: job.channelId,
         embedUrl: job.embedUrl,
-        streamType: job.streamType,
         createdAt: job.createdAt,
         lastAccessed: job.lastAccessed,
         uptime: Date.now() - job.createdAt,
-        ffmpegState: job.ffmpegProcess?.state,
+        isRunning: this.pipeline.isJobRunning(job.channelId),
       })),
     };
+  }
+
+  async cleanupAll() {
+    this.logger?.info('Cleaning up all stream jobs', { count: this.jobs.size });
+    await this.pipeline.stopAll();
+    this.jobs.clear();
   }
 }
 

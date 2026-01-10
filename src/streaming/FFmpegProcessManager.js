@@ -130,7 +130,19 @@ class ProcessHealthMonitor {
  * Wrapper for individual FFmpeg process with lifecycle management
  */
 class ProcessWrapper extends EventEmitter {
-  constructor({ channelId, streamUrl, outputPath, logger, memoryLimitMB, headers = {}, streamType = 'hls' }) {
+  constructor({
+    channelId,
+    streamUrl,
+    outputPath,
+    logger,
+    memoryLimitMB,
+    headers = {},
+    streamType = 'hls',
+    inputMode = 'url',
+    captureWidth = 1280,
+    captureHeight = 720,
+    captureFps = 30,
+  }) {
     super();
     this.channelId = channelId;
     this.streamUrl = streamUrl;
@@ -139,6 +151,10 @@ class ProcessWrapper extends EventEmitter {
     this.memoryLimitMB = memoryLimitMB;
     this.headers = headers;
     this.streamType = streamType;
+    this.inputMode = inputMode;
+    this.captureWidth = captureWidth;
+    this.captureHeight = captureHeight;
+    this.captureFps = captureFps;
 
     this.process = null;
     this.state = 'initializing';
@@ -150,16 +166,18 @@ class ProcessWrapper extends EventEmitter {
   }
 
   async start() {
-    const args = this.buildFFmpegArgs();
+    const args = this.inputMode === 'pipe' ? this.buildFFmpegArgsForPipe() : this.buildFFmpegArgs();
+    const stdinOption = this.inputMode === 'pipe' ? 'pipe' : 'ignore';
 
     this.logger?.info('Spawning FFmpeg process', {
       channelId: this.channelId,
       streamUrl: this.streamUrl,
       outputPath: this.outputPath,
+      inputMode: this.inputMode,
     });
 
     this.process = spawn('ffmpeg', args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [stdinOption, 'pipe', 'pipe'],
     });
     this.startTime = Date.now();
     this.state = 'running';
@@ -172,7 +190,12 @@ class ProcessWrapper extends EventEmitter {
     this.logger?.info('FFmpeg process healthy', {
       channelId: this.channelId,
       pid: this.process.pid,
+      inputMode: this.inputMode,
     });
+  }
+
+  getStdin() {
+    return this.process?.stdin;
   }
 
   buildFFmpegArgs() {
@@ -200,6 +223,37 @@ class ProcessWrapper extends EventEmitter {
       '-hls_flags', 'append_list+independent_segments+program_date_time+temp_file',
       '-hls_delete_threshold', '3',
       '-hls_playlist_type', 'event',
+      '-hls_segment_type', 'mpegts',
+      '-hls_segment_filename', segmentPattern,
+      '-start_number', '0',
+      this.outputPath,
+    ];
+  }
+
+  buildFFmpegArgsForPipe() {
+    const segmentPattern = path.join(path.dirname(this.outputPath), 'segment_%03d.ts');
+    const hlsTime = parseInt(process.env.HLS_SEGMENT_TIME) || 2;
+
+    return [
+      '-loglevel', 'warning',
+      // Input: JPEG images from stdin
+      '-f', 'image2pipe',
+      '-framerate', String(this.captureFps),
+      '-i', 'pipe:0',
+      // Video encoding (must encode since input is raw frames)
+      '-c:v', 'libx264',
+      '-preset', 'ultrafast',
+      '-tune', 'zerolatency',
+      '-pix_fmt', 'yuv420p',
+      '-g', String(this.captureFps * 2), // GOP size = 2 seconds
+      '-keyint_min', String(this.captureFps),
+      // No audio for now (audio will be added via separate stream later)
+      '-an',
+      // HLS output
+      '-f', 'hls',
+      '-hls_time', String(hlsTime),
+      '-hls_list_size', '6',
+      '-hls_flags', 'delete_segments+independent_segments',
       '-hls_segment_type', 'mpegts',
       '-hls_segment_filename', segmentPattern,
       '-start_number', '0',
@@ -390,6 +444,20 @@ class FFmpegProcessManager {
       });
       throw error;
     }
+  }
+
+  async spawnForPipe(channelId, outputPath, options = {}) {
+    const captureWidth = options.captureWidth || parseInt(process.env.CAPTURE_WIDTH) || 1280;
+    const captureHeight = options.captureHeight || parseInt(process.env.CAPTURE_HEIGHT) || 720;
+    const captureFps = options.captureFps || parseInt(process.env.CAPTURE_FPS) || 30;
+
+    return this.spawn(channelId, null, outputPath, {
+      inputMode: 'pipe',
+      captureWidth,
+      captureHeight,
+      captureFps,
+      ...options,
+    });
   }
 
   async kill(channelId, options = { signal: 'SIGTERM', timeout: 5000 }) {
