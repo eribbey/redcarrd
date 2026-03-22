@@ -215,6 +215,42 @@ describe('ChannelManager', () => {
     });
   });
 
+  describe('stream URL TTL', () => {
+    let channelManager;
+
+    beforeEach(() => {
+      channelManager = new ChannelManager({ lifetimeHours: 24, logger });
+    });
+
+    test('should need re-resolution when URL reaches 80% of TTL', () => {
+      const channel = {
+        id: 'test-1',
+        streamUrl: 'https://cdn.example.com/stream.m3u8',
+        resolvedAt: Date.now() - (25 * 60 * 1000), // 25 min ago (past 80% of 30 min TTL)
+      };
+      expect(channelManager.needsReResolution(channel)).toBe(true);
+    });
+
+    test('should not need re-resolution when URL is fresh', () => {
+      const channel = {
+        id: 'test-2',
+        streamUrl: 'https://cdn.example.com/stream.m3u8',
+        resolvedAt: Date.now() - (5 * 60 * 1000), // 5 min ago
+      };
+      expect(channelManager.needsReResolution(channel)).toBe(false);
+    });
+
+    test('should need re-resolution when no resolvedAt', () => {
+      const channel = { id: 'test-3', streamUrl: 'https://cdn.example.com/stream.m3u8' };
+      expect(channelManager.needsReResolution(channel)).toBe(true);
+    });
+
+    test('should need re-resolution when no streamUrl', () => {
+      const channel = { id: 'test-4', resolvedAt: Date.now() };
+      expect(channelManager.needsReResolution(channel)).toBe(true);
+    });
+  });
+
   test('retains upstream cookies across proxied HLS requests', async () => {
     const manager = new ChannelManager({ lifetimeHours: 24, logger });
     const channel = {

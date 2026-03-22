@@ -338,6 +338,13 @@ class ChannelManager {
     const headers = this.buildStreamHeaders(channel);
     this.logger?.debug('Proxying stream fetch', { channelId: channel?.id, targetUrl });
 
+    // Proactive re-resolution if stream URL is approaching TTL
+    if (this.needsReResolution(channel)) {
+      this.resolveStream(channel).catch(err =>
+        this.logger.warn('Background re-resolution failed', { channelId: channel.id, error: err.message })
+      );
+    }
+
     const response = await axios.get(targetUrl, {
       headers,
       responseType: 'arraybuffer',
@@ -346,6 +353,17 @@ class ChannelManager {
     });
 
     this.updateCookies(channel, response.headers['set-cookie']);
+
+    // Trigger re-resolution on upstream rejection
+    if (response.status === 403 || response.status === 410) {
+      this.logger.warn('Upstream rejected request, triggering re-resolution', {
+        channelId: channel.id,
+        status: response.status,
+      });
+      this.resolveStream(channel).catch(err =>
+        this.logger.warn('Re-resolution after rejection failed', { channelId: channel.id, error: err.message })
+      );
+    }
 
     return response;
   }
@@ -385,6 +403,13 @@ class ChannelManager {
     const mime = channel?.streamMimeType || '';
     const url = channel?.streamUrl || '';
     return /mpegurl/i.test(mime) || url.includes('.m3u8');
+  }
+
+  needsReResolution(channel) {
+    if (!channel.resolvedAt || !channel.streamUrl) return true;
+    const ttlMs = (parseInt(process.env.STREAM_URL_TTL_MINUTES) || 30) * 60 * 1000;
+    const age = Date.now() - channel.resolvedAt;
+    return age > ttlMs * 0.8; // Re-resolve at 80% of TTL
   }
 
   async resolveStream(channel) {
