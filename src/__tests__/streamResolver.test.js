@@ -43,17 +43,17 @@ function createLogger() {
 }
 
 /**
- * Helper: simulate a network request event on the mock page.
- * When page.on('request', handler) is called, we capture the handler,
- * then invoke it with a mock request object.
+ * Helper: simulate a network response event on the mock page.
+ * When page.on('response', handler) is called, we capture the handler,
+ * then invoke it with a mock response object.
  */
-function simulateRequest(url) {
-  const requestHandlers = mockPage.on.mock.calls
-    .filter(([event]) => event === 'request')
+function simulateResponse(url, status = 200) {
+  const responseHandlers = mockPage.on.mock.calls
+    .filter(([event]) => event === 'response')
     .map(([, handler]) => handler);
 
-  const mockRequest = { url: () => url };
-  requestHandlers.forEach((handler) => handler(mockRequest));
+  const mockResponse = { url: () => url, status: () => status };
+  responseHandlers.forEach((handler) => handler(mockResponse));
 }
 
 describe('StreamResolver', () => {
@@ -107,10 +107,10 @@ describe('StreamResolver', () => {
     test('should detect HLS manifest URL from network traffic', async () => {
       // Make page.on capture the request handler, then simulate a request
       mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
+        if (event === 'response') {
           // Schedule the mock request emission after setup
           setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/live/stream.m3u8' });
+            handler({ status: () => 200, url: () => 'https://cdn.example.com/live/stream.m3u8' });
           }, 100);
         }
       });
@@ -130,9 +130,9 @@ describe('StreamResolver', () => {
 
     test('should detect DASH manifest URL from network traffic', async () => {
       mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
+        if (event === 'response') {
           setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/live/manifest.mpd' });
+            handler({ status: () => 200, url: () => 'https://cdn.example.com/live/manifest.mpd' });
           }, 100);
         }
       });
@@ -150,12 +150,12 @@ describe('StreamResolver', () => {
 
     test('should filter out ad/tracking URLs and detect real stream', async () => {
       mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
+        if (event === 'response') {
           setTimeout(() => {
             // First: ad URL that should be filtered
-            handler({ url: () => 'https://ad.doubleclick.net/video.m3u8' });
+            handler({ status: () => 200, url: () => 'https://ad.doubleclick.net/video.m3u8' });
             // Second: real stream URL
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
+            handler({ status: () => 200, url: () => 'https://cdn.example.com/stream.m3u8' });
           }, 100);
         }
       });
@@ -194,9 +194,9 @@ describe('StreamResolver', () => {
 
     test('should apply solver cookies when provided', async () => {
       mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
+        if (event === 'response') {
           setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
+            handler({ status: () => 200, url: () => 'https://cdn.example.com/stream.m3u8' });
           }, 100);
         }
       });
@@ -218,12 +218,12 @@ describe('StreamResolver', () => {
     test('should retry with different user agents on failure', async () => {
       let attemptCount = 0;
       mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
+        if (event === 'response') {
           attemptCount++;
           if (attemptCount >= 2) {
             // Succeed on second attempt
             setTimeout(() => {
-              handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
+              handler({ status: () => 200, url: () => 'https://cdn.example.com/stream.m3u8' });
             }, 100);
           }
           // First attempt: no requests emitted (will time out)
@@ -248,9 +248,9 @@ describe('StreamResolver', () => {
 
     test('should include cookies in returned headers', async () => {
       mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
+        if (event === 'response') {
           setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
+            handler({ status: () => 200, url: () => 'https://cdn.example.com/stream.m3u8' });
           }, 100);
         }
       });
@@ -271,9 +271,9 @@ describe('StreamResolver', () => {
 
     test('should inject anti-detection init scripts', async () => {
       mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
+        if (event === 'response') {
           setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
+            handler({ status: () => 200, url: () => 'https://cdn.example.com/stream.m3u8' });
           }, 100);
         }
       });
@@ -289,9 +289,9 @@ describe('StreamResolver', () => {
 
     test('should set Referer and Origin headers from embed URL', async () => {
       mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
+        if (event === 'response') {
           setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
+            handler({ status: () => 200, url: () => 'https://cdn.example.com/stream.m3u8' });
           }, 100);
         }
       });
@@ -320,11 +320,11 @@ describe('StreamResolver', () => {
       expect(mockContext.close).toHaveBeenCalled();
     });
 
-    test('should detect progressive MP4 from network traffic', async () => {
+    test('should detect MP4 from network traffic', async () => {
       mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
+        if (event === 'response') {
           setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/video.mp4' });
+            handler({ status: () => 200, url: () => 'https://cdn.example.com/video.mp4' });
           }, 100);
         }
       });
@@ -336,7 +336,7 @@ describe('StreamResolver', () => {
       });
 
       expect(result).not.toBeNull();
-      expect(result.type).toBe('progressive');
+      expect(result.type).toBe('mp4');
       expect(result.url).toBe('https://cdn.example.com/video.mp4');
     });
   });
@@ -346,9 +346,9 @@ describe('StreamResolver', () => {
       const { chromium } = require('playwright');
 
       mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
+        if (event === 'response') {
           setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
+            handler({ status: () => 200, url: () => 'https://cdn.example.com/stream.m3u8' });
           }, 50);
         }
       });

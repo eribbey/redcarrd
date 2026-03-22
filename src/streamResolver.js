@@ -86,9 +86,8 @@ const ANTI_DETECTION_SCRIPT = () => {
  * fallback to find HLS/DASH/MP4 stream URLs.
  */
 class StreamResolver {
-  constructor({ logger, solverClient } = {}) {
+  constructor({ logger } = {}) {
     this.logger = logger || console;
-    this.solverClient = solverClient || null;
     this._browser = null;
     this._idleTimer = null;
     this._launching = null;
@@ -344,7 +343,7 @@ class StreamResolver {
       const finish = (err, info) => {
         if (done) return;
         done = true;
-        page.removeListener('request', onRequest);
+        page.removeListener('response', onResponse);
         clearTimeout(timer);
         if (err) return reject(err);
         resolve(info);
@@ -371,9 +370,12 @@ class StreamResolver {
         finish(new Error(timeoutMessage));
       }, timeoutMs);
 
-      function onRequest(request) {
+      function onResponse(response) {
         try {
-          const url = request.url();
+          const status = response.status();
+          if (status < 200 || status >= 400) return;
+
+          const url = response.url();
 
           // Filter out ad/tracking URLs
           if (isAdUrl(url)) return;
@@ -383,12 +385,12 @@ class StreamResolver {
           } else if (/\.mpd(\?|$)/i.test(url)) {
             finish(null, { type: 'dash', url });
           } else if (/\.(mp4)(\?|$)/i.test(url)) {
-            finish(null, { type: 'progressive', url });
+            finish(null, { type: 'mp4', url });
           }
         } catch (_) {}
       }
 
-      page.on('request', onRequest);
+      page.on('response', onResponse);
     });
   }
 
@@ -409,7 +411,7 @@ class StreamResolver {
           return 'dash';
         }
         if (/\.mp4(\?|$)/i.test(target) || mimeType.includes('mp4')) {
-          return 'progressive';
+          return 'mp4';
         }
         return null;
       }
@@ -417,7 +419,7 @@ class StreamResolver {
       function normalizeCandidate(url, mime) {
         if (!url) return null;
         const type = inferType(url, mime);
-        return { url, type: type || 'progressive' };
+        return { url, type: type || 'mp4' };
       }
 
       const candidates = [];
@@ -452,7 +454,7 @@ class StreamResolver {
         });
       });
 
-      return candidates.find((c) => c.type !== 'progressive') || candidates[0] || null;
+      return candidates.find((c) => c.type !== 'mp4') || candidates[0] || null;
     });
 
     return info;
