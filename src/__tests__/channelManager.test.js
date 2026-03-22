@@ -117,6 +117,65 @@ describe('ChannelManager', () => {
     expect(playlist).toContain('Playlist is still hydrating');
   });
 
+  describe('resolveStream()', () => {
+    let channelManager;
+
+    beforeEach(() => {
+      channelManager = new ChannelManager({ lifetimeHours: 24, logger });
+    });
+
+    test('should set streamMode to hls when HLS URL detected', async () => {
+      const mockResolver = {
+        resolve: jest.fn().mockResolvedValue({
+          url: 'https://cdn.example.com/stream.m3u8',
+          type: 'hls',
+          headers: { Referer: 'https://embed.example.com' },
+        }),
+        close: jest.fn(),
+      };
+      channelManager.streamResolver = mockResolver;
+
+      const channel = { id: 'test-1', embedUrl: 'https://embed.example.com/player/1' };
+      await channelManager.resolveStream(channel);
+
+      expect(channel.streamUrl).toBe('https://cdn.example.com/stream.m3u8');
+      expect(channel.streamMode).toBe('hls');
+      expect(channel.streamHeaders).toEqual({ Referer: 'https://embed.example.com' });
+    });
+
+    test('should set streamMode to transmux when non-HLS URL detected', async () => {
+      const mockResolver = {
+        resolve: jest.fn().mockResolvedValue({
+          url: 'https://cdn.example.com/stream.mpd',
+          type: 'dash',
+          headers: { Referer: 'https://embed.example.com' },
+        }),
+        close: jest.fn(),
+      };
+      channelManager.streamResolver = mockResolver;
+
+      const channel = { id: 'test-2', embedUrl: 'https://embed.example.com/player/2' };
+      await channelManager.resolveStream(channel);
+
+      expect(channel.streamUrl).toBe('https://cdn.example.com/stream.mpd');
+      expect(channel.streamMode).toBe('transmux');
+    });
+
+    test('should respect cooldown period', async () => {
+      const mockResolver = { resolve: jest.fn(), close: jest.fn() };
+      channelManager.streamResolver = mockResolver;
+
+      const channel = {
+        id: 'test-3',
+        embedUrl: 'https://embed.example.com/player/3',
+        lastResolutionAttempt: Date.now() - 30000, // 30 seconds ago
+      };
+      await channelManager.resolveStream(channel);
+
+      expect(mockResolver.resolve).not.toHaveBeenCalled();
+    });
+  });
+
   test('retains upstream cookies across proxied HLS requests', async () => {
     const manager = new ChannelManager({ lifetimeHours: 24, logger });
     const channel = {
