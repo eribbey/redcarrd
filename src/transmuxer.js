@@ -3,6 +3,8 @@ const path = require('path');
 const { spawn } = require('child_process');
 const os = require('os');
 
+const FFMPEG_MAX_CONCURRENT = parseInt(process.env.FFMPEG_MAX_CONCURRENT) || 3;
+
 class Transmuxer {
   constructor({ logger }) {
     this.logger = logger;
@@ -27,6 +29,15 @@ class Transmuxer {
     if (existing) {
       this.logger?.info('Existing transmux job is stale, restarting', { channelId });
       await this.cleanupJob(channelId);
+    }
+
+    const activeJobs = [...this.jobs.values()].filter(j => j.process && !j.process.killed);
+    if (activeJobs.length >= FFMPEG_MAX_CONCURRENT) {
+      this.logger?.warn('FFmpeg concurrency limit reached', {
+        active: activeJobs.length,
+        max: FFMPEG_MAX_CONCURRENT,
+      });
+      return null;
     }
 
     const workDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'transmux-'));

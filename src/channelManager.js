@@ -418,14 +418,26 @@ class ChannelManager {
   }
 
   async ensureTransmuxed(channel) {
-    // Note: Direct stream URL transmuxing without browser automation
-    // is not yet supported in StreamManager. For now, this returns null
-    // and will be enhanced in future updates.
-    if (!channel?.streamUrl) return null;
-    this.logger?.warn('Direct stream URL transmuxing not yet supported in new StreamManager', {
-      channelId: channel.id,
-    });
-    return null;
+    if (!channel.streamUrl) {
+      this.logger.warn('No stream URL for transmuxing', { channelId: channel.id });
+      return null;
+    }
+
+    try {
+      const job = await this.transmuxer.ensureJob(
+        channel.id,
+        channel.streamUrl,
+        channel.streamHeaders || {}
+      );
+      return job;
+    } catch (error) {
+      this.logger.error('Transmuxing failed', {
+        channelId: channel.id,
+        streamUrl: channel.streamUrl,
+        error: error.message,
+      });
+      return null;
+    }
   }
 
   getTransmuxJob(channelId) {

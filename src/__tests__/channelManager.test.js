@@ -176,6 +176,45 @@ describe('ChannelManager', () => {
     });
   });
 
+  describe('ensureTransmuxed()', () => {
+    let channelManager;
+
+    beforeEach(() => {
+      channelManager = new ChannelManager({ lifetimeHours: 24, logger });
+    });
+
+    test('should start transmuxer job for non-HLS channel', async () => {
+      const mockTransmuxer = {
+        ensureJob: jest.fn().mockResolvedValue({
+          manifestPath: '/tmp/transmux-abc/test.m3u8',
+          workDir: '/tmp/transmux-abc',
+        }),
+      };
+      channelManager.transmuxer = mockTransmuxer;
+
+      const channel = {
+        id: 'test-1',
+        streamUrl: 'https://cdn.example.com/stream.mpd',
+        streamMode: 'transmux',
+        streamHeaders: { Referer: 'https://embed.example.com' },
+      };
+
+      const result = await channelManager.ensureTransmuxed(channel);
+      expect(result).toBeTruthy();
+      expect(mockTransmuxer.ensureJob).toHaveBeenCalledWith(
+        'test-1',
+        'https://cdn.example.com/stream.mpd',
+        { Referer: 'https://embed.example.com' }
+      );
+    });
+
+    test('should return null when no stream URL', async () => {
+      const channel = { id: 'test-2', streamMode: 'transmux' };
+      const result = await channelManager.ensureTransmuxed(channel);
+      expect(result).toBeNull();
+    });
+  });
+
   test('retains upstream cookies across proxied HLS requests', async () => {
     const manager = new ChannelManager({ lifetimeHours: 24, logger });
     const channel = {
