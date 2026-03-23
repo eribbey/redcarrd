@@ -14,6 +14,48 @@ let logStream = null;
 const previewPlayers = new WeakMap();
 const logLevelRank = { debug: 0, info: 1, warn: 2, error: 3 };
 
+// --- Tab Navigation ---
+
+function initTabs() {
+  const tabs = document.querySelectorAll('.tab');
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', () => switchTab(tab.dataset.tab));
+  });
+
+  // Restore tab from URL hash
+  const hash = window.location.hash.replace('#', '') || 'channels';
+  switchTab(hash);
+
+  window.addEventListener('hashchange', () => {
+    const h = window.location.hash.replace('#', '') || 'channels';
+    switchTab(h);
+  });
+}
+
+function switchTab(tabName) {
+  const validTabs = ['channels', 'settings', 'logs'];
+  if (!validTabs.includes(tabName)) tabName = 'channels';
+
+  // Update tab buttons
+  document.querySelectorAll('.tab').forEach((t) => {
+    t.classList.toggle('active', t.dataset.tab === tabName);
+    t.setAttribute('aria-selected', t.dataset.tab === tabName);
+  });
+
+  // Show/hide content
+  document.querySelectorAll('.tab-content').forEach((c) => {
+    c.classList.toggle('hidden', c.id !== `tab-${tabName}`);
+    c.classList.toggle('active', c.id === `tab-${tabName}`);
+  });
+
+  // Update hash without triggering scroll
+  if (window.location.hash !== `#${tabName}`) {
+    history.replaceState(null, '', `#${tabName}`);
+  }
+}
+
+// --- Error Banner ---
+
 function showError(message) {
   const banner = document.getElementById('errorBanner');
   if (!banner) return;
@@ -27,6 +69,42 @@ function clearError() {
   banner.textContent = '';
   banner.classList.add('hidden');
 }
+
+// --- Copy to Clipboard ---
+
+function initCopyButtons() {
+  document.getElementById('copyPlaylist').addEventListener('click', () => {
+    copyToClipboard('playlistUrl', 'copyPlaylist');
+  });
+  document.getElementById('copyEpg').addEventListener('click', () => {
+    copyToClipboard('epgUrl', 'copyEpg');
+  });
+}
+
+function copyToClipboard(inputId, btnId) {
+  const input = document.getElementById(inputId);
+  const btn = document.getElementById(btnId);
+  if (!input) return;
+
+  navigator.clipboard.writeText(input.value).then(() => {
+    const original = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  }).catch(() => {
+    // Fallback: select the input text
+    input.select();
+  });
+}
+
+function renderUrls() {
+  const origin = window.location.origin;
+  const playlistInput = document.getElementById('playlistUrl');
+  const epgInput = document.getElementById('epgUrl');
+  if (playlistInput) playlistInput.value = `${origin}/playlist.m3u8`;
+  if (epgInput) epgInput.value = `${origin}/epg.xml`;
+}
+
+// --- State & Config ---
 
 async function fetchState() {
   try {
@@ -54,11 +132,13 @@ function renderConfig() {
   document.getElementById('lifetime').value = state.config.lifetimeHours || '';
 }
 
+// --- Channels ---
+
 function renderChannels() {
   const container = document.getElementById('channels');
   container.innerHTML = '';
   if (!state.channels.length) {
-    container.innerHTML = '<p class="muted">No channels built yet. Use rebuild to fetch from streamed.pk.</p>';
+    container.innerHTML = '<p class="muted">No channels built yet. Hit Rebuild in Settings to fetch from streamed.pk.</p>';
     return;
   }
 
@@ -75,7 +155,6 @@ function renderChannels() {
     const previewActions = node.querySelector('.preview-actions');
 
     fillSelect(sourceSelect, channel.sourceOptions, channel.embedUrl);
-
     sourceSelect.dataset.currentValue = channel.embedUrl;
 
     sourceSelect.addEventListener('change', async (e) => {
@@ -102,27 +181,27 @@ function renderChannels() {
     });
 
     const streamPath = `/hls/${encodeURIComponent(channel.id)}`;
-    previewLink.disabled = false;
-    previewLink.textContent = 'Show stream';
+    previewLink.textContent = 'Preview';
     previewPlayer?.classList.add('hidden');
+
     previewLink.addEventListener('click', (e) => {
       e.preventDefault();
       if (previewPlayer.classList.contains('hidden')) {
         loadPreview(previewPlayer, streamPath);
         previewPlayer.classList.remove('hidden');
-        previewLink.textContent = 'Hide preview';
+        previewLink.textContent = 'Hide';
       } else {
         destroyPreviewPlayer(previewPlayer);
         previewPlayer.classList.add('hidden');
-        previewLink.textContent = 'Show stream';
+        previewLink.textContent = 'Preview';
       }
     });
 
     if (channel.embedUrl) {
       const embedLink = document.createElement('button');
       embedLink.type = 'button';
-      embedLink.className = previewLink.className;
-      embedLink.textContent = 'Open embed';
+      embedLink.className = 'text-link';
+      embedLink.textContent = 'Embed';
       embedLink.addEventListener('click', (e) => {
         e.preventDefault();
         window.open(channel.embedUrl, '_blank', 'noopener');
@@ -136,29 +215,30 @@ function renderChannels() {
 
 function renderPlaylistStatus() {
   const statusEl = document.getElementById('playlistStatus');
-  const playlistBtn = document.getElementById('playlistBtn');
-  if (!statusEl || !playlistBtn) return;
+  const settingsStatusEl = document.getElementById('settingsPlaylistStatus');
 
+  let statusText;
   if (state.hydrating) {
-    statusEl.textContent = 'Resolving streams before building playlist...';
-    playlistBtn.disabled = true;
-    return;
+    statusText = 'Resolving streams...';
+  } else if (state.playlistReady) {
+    statusText = `${state.channels.length} channels ready`;
+  } else {
+    statusText = 'Waiting for streams to resolve...';
   }
 
-  if (state.playlistReady) {
-    statusEl.textContent = 'playlist.m3u8 is ready to download.';
-    playlistBtn.disabled = false;
-  } else {
-    statusEl.textContent = 'Waiting for streams to resolve before playlist is available.';
-    playlistBtn.disabled = true;
-  }
+  if (statusEl) statusEl.textContent = statusText;
+  if (settingsStatusEl) settingsStatusEl.textContent = state.playlistReady
+    ? 'Playlist and EPG are ready.'
+    : state.hydrating
+      ? 'Resolving streams before playlist is available...'
+      : 'Waiting for streams to resolve before playlist is available.';
 }
 
 function fillSelect(select, options, current) {
   select.innerHTML = '';
   if (!options?.length) {
     const opt = document.createElement('option');
-    opt.textContent = 'Not available';
+    opt.textContent = 'N/A';
     opt.disabled = true;
     opt.selected = true;
     select.appendChild(opt);
@@ -174,6 +254,8 @@ function fillSelect(select, options, current) {
     select.appendChild(option);
   });
 }
+
+// --- Preview Player ---
 
 function destroyPreviewPlayer(videoEl) {
   const player = previewPlayers.get(videoEl);
@@ -204,6 +286,8 @@ function loadPreview(videoEl, url) {
 
   videoEl.play()?.catch(() => {});
 }
+
+// --- Logs ---
 
 function renderLogs() {
   if (state.logsPaused) return;
@@ -268,11 +352,11 @@ function updateLogStatus() {
 
   if (state.logsPaused) {
     const queued = state.pendingLogs;
-    statusEl.textContent = queued ? `Paused (${queued} new entries queued)` : 'Paused';
-    toggleBtn.textContent = 'Resume logs';
+    statusEl.textContent = queued ? `Paused (${queued} queued)` : 'Paused';
+    toggleBtn.textContent = 'Resume';
   } else {
     statusEl.textContent = 'Live';
-    toggleBtn.textContent = 'Pause logs';
+    toggleBtn.textContent = 'Pause';
   }
 }
 
@@ -302,6 +386,8 @@ function startLogStream() {
     setTimeout(startLogStream, 3000);
   };
 }
+
+// --- Config Actions ---
 
 async function saveConfig(evt) {
   evt.preventDefault();
@@ -362,20 +448,19 @@ async function rebuild() {
   }
 }
 
+// --- Init ---
+
 document.getElementById('configForm').addEventListener('submit', saveConfig);
 document.getElementById('rebuildBtn').addEventListener('click', rebuild);
-document.getElementById('playlistBtn').addEventListener('click', () => {
-  window.open('/playlist.m3u8', '_blank', 'noopener');
-});
-document.getElementById('epgBtn').addEventListener('click', () => {
-  window.open('/epg.xml', '_blank', 'noopener');
-});
 document.getElementById('toggleLogs').addEventListener('click', toggleLogs);
 document.getElementById('logLevelFilter').addEventListener('change', (event) => {
   state.logLevelFilter = event.target.value;
   renderLogs();
 });
 
+initTabs();
+initCopyButtons();
+renderUrls();
 fetchState();
 startLogStream();
 updateLogStatus();
