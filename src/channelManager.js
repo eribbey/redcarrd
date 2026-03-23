@@ -276,7 +276,7 @@ class ChannelManager {
   }
 
   buildStreamHeaders(channel) {
-    const headers = { ...buildDefaultStreamHeaders(channel?.embedUrl), ...(channel?.requestHeaders || {}) };
+    const headers = { ...buildDefaultStreamHeaders(channel?.embedUrl), ...(channel?.requestHeaders || {}), ...(channel?.streamHeaders || {}) };
 
     if (!headers.Referer && channel?.embedUrl) headers.Referer = channel.embedUrl;
     if (!headers.Origin && channel?.embedUrl) {
