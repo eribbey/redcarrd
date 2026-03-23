@@ -243,8 +243,6 @@ class StreamResolver {
         locale: 'en-US',
         extraHTTPHeaders: {
           'Accept-Language': 'en-US,en;q=0.9',
-          ...(referer ? { Referer: referer } : {}),
-          ...(origin ? { Origin: origin } : {}),
         },
       });
 
@@ -343,7 +341,7 @@ class StreamResolver {
       const finish = (err, info) => {
         if (done) return;
         done = true;
-        page.removeListener('response', onResponse);
+        page.removeListener('request', onRequest);
         clearTimeout(timer);
         if (err) return reject(err);
         resolve(info);
@@ -370,12 +368,9 @@ class StreamResolver {
         finish(new Error(timeoutMessage));
       }, timeoutMs);
 
-      function onResponse(response) {
+      function onRequest(request) {
         try {
-          const status = response.status();
-          if (status < 200 || status >= 400) return;
-
-          const url = response.url();
+          const url = request.url();
 
           // Filter out ad/tracking URLs
           if (isAdUrl(url)) return;
@@ -390,7 +385,7 @@ class StreamResolver {
         } catch (_) {}
       }
 
-      page.on('response', onResponse);
+      page.on('request', onRequest);
     });
   }
 
