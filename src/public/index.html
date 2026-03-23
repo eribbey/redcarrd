@@ -9,61 +9,77 @@
   <body>
     <div class="page">
       <header>
-        <h1>Redcarrd IPTV Proxy</h1>
-        <p class="muted">Self-hosted IPTV playlist and EPG builder for streamed.pk</p>
+        <h1>Redcarrd</h1>
+        <nav class="tabs" role="tablist">
+          <button class="tab active" data-tab="channels" role="tab" aria-selected="true">Channels</button>
+          <button class="tab" data-tab="settings" role="tab" aria-selected="false">Settings</button>
+          <button class="tab" data-tab="logs" role="tab" aria-selected="false">Logs</button>
+        </nav>
       </header>
 
       <div id="errorBanner" class="toast hidden" role="status" aria-live="polite"></div>
 
       <main>
-        <section class="card">
-          <div class="card-header">
-            <div>
-              <h2>Configuration</h2>
-              <p class="muted">Select categories and refresh cadence</p>
-            </div>
-            <button id="rebuildBtn" class="primary">Rebuild now</button>
-          </div>
-          <form id="configForm" class="config-grid">
-            <label>
-              Categories
-              <input id="categories" type="text" placeholder="football,basketball" />
-              <small>Comma-separated list. Leave empty to include everything.</small>
-            </label>
-            <label>
-              Rebuild interval (minutes)
-              <input id="interval" type="number" min="5" step="5" />
-            </label>
-            <label>
-              Lifetime (hours)
-              <input id="lifetime" type="number" min="1" step="1" />
-            </label>
-            <button type="submit" class="secondary">Save configuration</button>
-          </form>
-        </section>
-
-        <section class="card">
-          <div class="card-header">
-            <div>
-              <h2>Channels</h2>
-              <p class="muted">Preview and adjust source endpoints exposed by streamed.pk</p>
-            </div>
-            <div class="links">
-              <button id="playlistBtn" class="secondary link-button" type="button">
-                Download playlist.m3u8
-              </button>
-              <button id="epgBtn" class="secondary link-button" type="button">Download EPG</button>
-            </div>
-          </div>
+        <!-- Channels Tab -->
+        <section id="tab-channels" class="tab-content active">
           <p id="playlistStatus" class="muted"></p>
           <div id="channels" class="channel-grid"></div>
         </section>
 
-        <section class="card">
-          <div class="card-header">
-            <div>
-              <h2>Logs</h2>
-              <p class="muted">Latest activity from scraper and proxy — <span id="logStatus">Live</span></p>
+        <!-- Settings Tab -->
+        <section id="tab-settings" class="tab-content hidden">
+          <div class="card">
+            <h2>Playlist & EPG URLs</h2>
+            <p class="muted">Copy these into your IPTV client</p>
+            <div class="url-group">
+              <label>
+                Playlist URL
+                <div class="copy-row">
+                  <input id="playlistUrl" type="text" readonly />
+                  <button id="copyPlaylist" class="secondary copy-btn" type="button">Copy</button>
+                </div>
+              </label>
+              <label>
+                EPG URL
+                <div class="copy-row">
+                  <input id="epgUrl" type="text" readonly />
+                  <button id="copyEpg" class="secondary copy-btn" type="button">Copy</button>
+                </div>
+              </label>
+            </div>
+            <p id="settingsPlaylistStatus" class="muted"></p>
+          </div>
+
+          <div class="card">
+            <h2>Configuration</h2>
+            <p class="muted">Select categories and refresh cadence</p>
+            <form id="configForm" class="config-grid">
+              <label>
+                Categories
+                <input id="categories" type="text" placeholder="football,basketball" />
+                <small>Comma-separated list. Leave empty to include everything.</small>
+              </label>
+              <label>
+                Rebuild interval (minutes)
+                <input id="interval" type="number" min="5" step="5" />
+              </label>
+              <label>
+                Lifetime (hours)
+                <input id="lifetime" type="number" min="1" step="1" />
+              </label>
+              <div class="button-row">
+                <button type="submit" class="secondary">Save configuration</button>
+                <button id="rebuildBtn" class="primary" type="button">Rebuild now</button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <!-- Logs Tab -->
+        <section id="tab-logs" class="tab-content hidden">
+          <div class="log-header">
+            <div class="log-status-text">
+              <span id="logStatus">Live</span>
             </div>
             <div class="log-actions">
               <label class="inline-label">
@@ -86,17 +102,15 @@
 
     <template id="channelTemplate">
       <div class="channel-card">
-        <div class="channel-title"></div>
-        <div class="muted channel-meta"></div>
-        <div class="controls">
-          <label>Source endpoint
-            <select class="source"></select>
-          </label>
+        <div class="channel-header">
+          <div class="channel-title"></div>
+          <select class="source"></select>
         </div>
+        <div class="muted channel-meta"></div>
         <div class="preview">
-          <video class="preview-player" controls muted playsinline></video>
+          <video class="preview-player hidden" controls muted playsinline></video>
           <div class="preview-actions">
-            <button class="preview-link secondary link-button" type="button">Preview stream</button>
+            <button class="preview-link text-link" type="button">Preview</button>
           </div>
         </div>
       </div>
