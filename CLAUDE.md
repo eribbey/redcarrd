@@ -21,7 +21,7 @@ This document provides comprehensive guidance for AI assistants working on the R
 
 ### Core Functionality
 - Scrapes events from streamed.pk APIs
-- Resolves and restreams embed URLs using Playwright + FFmpeg
+- Resolves stream URLs via short-lived Playwright sessions and proxies/transmuxes via FFmpeg
 - Generates M3U8 playlists and XMLTV EPG for IPTV clients
 - Provides web UI for configuration and stream preview
 - Handles Cloudflare challenge bypass via solver services
@@ -42,7 +42,6 @@ This document provides comprehensive guidance for AI assistants working on the R
 ├── src/
 │   ├── __tests__/                          # Jest test suites
 │   │   ├── channelManager.test.js          # Channel lifecycle tests
-│   │   ├── restreamer.test.js              # Restream job tests
 │   │   ├── scraper.test.js                 # Non-Playwright scraper tests
 │   │   ├── scraper.playwright.test.js      # Playwright unit tests
 │   │   └── scraper.playwright.integration.test.js  # Integration tests
@@ -53,8 +52,8 @@ This document provides comprehensive guidance for AI assistants working on the R
 │   ├── server.js                           # Main entry point - Express server
 │   ├── channelManager.js                   # Channel lifecycle management
 │   ├── scraper.js                          # Web scraping engine
-│   ├── restreamer.js                       # Restream job orchestration
-│   ├── restream.js                         # Worker script (spawned as child process)
+│   ├── embedResolver.js                    # Embed URL extraction from event pages
+│   ├── streamResolver.js                   # Stream URL detection via Playwright
 │   ├── transmuxer.js                       # FFmpeg transmuxing
 │   ├── solverClient.js                     # Cloudflare solver integration
 │   ├── config.js                           # Configuration persistence
@@ -75,40 +74,40 @@ This document provides comprehensive guidance for AI assistants working on the R
 - Static file serving for UI
 - M3U8 playlist (`/playlist.m3u8`) and EPG (`/epg.xml`)
 - Rebuild scheduling and orchestration
+- 2-way stream routing: HLS proxy or transmux
 
 **`channelManager.js`** - Channel Lifecycle
 - Builds channels from scraped events
 - Reconciles channel changes (add/update/remove)
 - Generates M3U8 playlists and XMLTV EPG
 - Proxies and rewrites HLS manifests
-- Coordinates transmuxing/restreaming jobs
+- Uses StreamResolver for stream URL detection (no persistent browser instances)
+- Coordinates transmuxing jobs with `FFMPEG_MAX_CONCURRENT` concurrency limit
 - Expires stale channels based on event time + lifetime
 
-**`scraper.js`** - Event & Stream Scraping
+**`scraper.js`** - Event Scraping
 - Fetches live events from streamed.pk API
 - Two modes: Playwright (JS-rendered) or axios (static HTML)
-- Extracts embed URLs and stream manifests
 - Cloudflare challenge detection and bypass
 - Multiple user agent fallback strategy
 
-**`restreamer.js`** - Job Management
-- Spawns Node.js child processes running `restream.js`
-- Manages job lifecycle (create, monitor, cleanup)
-- Validates FFmpeg and Playwright dependencies
-- Handles job staleness and reuse
-- Temp directory management
+**`embedResolver.js`** - Embed URL Extraction
+- Extracts embed URLs from event pages
+- Split from scraper.js for separation of concerns
+- Handles iframe patterns and URL normalization
 
-**`restream.js`** - Worker Process (Standalone)
-- Launched as child process by restreamer.js
-- Uses Playwright to load embed pages
-- Detects HLS/DASH streams from network traffic
-- Pipes through FFmpeg to generate local HLS output
-- Graceful SIGTERM/SIGINT shutdown handling
+**`streamResolver.js`** - Stream URL Detection
+- Uses short-lived Playwright browser sessions
+- Detects HLS/DASH/MP4 URLs from network traffic
+- Inspects player config as fallback detection method
+- Closes browser context after URL detection (no persistent instances)
+- Configurable via `STREAM_DETECT_TIMEOUT_MS`
 
 **`transmuxer.js`** - Stream Conversion
-- Converts non-HLS streams to HLS format
+- Converts non-HLS streams to HLS format via FFmpeg
 - Spawns FFmpeg processes with HLS output
 - Creates temp working directories for segments
+- Wired into channelManager with `FFMPEG_MAX_CONCURRENT` concurrency limit
 - Process cleanup on completion
 
 **`solverClient.js`** - Challenge Bypass
@@ -202,10 +201,12 @@ PORT=3005                              # HTTP server port
 FRONT_PAGE_URL=https://streamed.pk     # Target website
 SCRAPER_RENDER_WITH_JS=true           # Use Playwright vs axios
 
-# Restreaming Configuration
-HYDRATION_CONCURRENCY=5                # Parallel restream jobs
-RESTREAM_MAX_ATTEMPTS=4                # Stream detection retries
-RESTREAM_DETECT_CONFIG_FALLBACK=true  # Player config fallback
+# Stream Resolution Configuration
+STREAM_URL_TTL_MINUTES=30              # TTL for resolved stream URLs (default 30)
+FFMPEG_MAX_CONCURRENT=3                # Max concurrent FFmpeg transmux processes (default 3)
+STREAM_DETECT_TIMEOUT_MS=20000         # Timeout for stream URL detection (default 20000)
+BROWSER_IDLE_TIMEOUT_MINUTES=60        # Browser idle timeout before cleanup (default 60)
+HYDRATION_CONCURRENCY=5                # Parallel hydration jobs
 
 # Solver Configuration (Cloudflare bypass)
 SOLVER_ENDPOINT_URL=http://solver:8191/v1  # Flaresolverr/Byparr endpoint
@@ -291,10 +292,10 @@ logger.info('Starting restream job for ' + channelId);
 // GOOD: Proper error handling
 async function processChannel(channel) {
   try {
-    const result = await restreamer.startJob(channel);
-    return result;
+    const streamUrl = await streamResolver.resolve(channel.embedUrl);
+    return streamUrl;
   } catch (error) {
-    logger.error('Restream failed', { channelId: channel.id, error: error.message });
+    logger.error('Stream resolution failed', { channelId: channel.id, error: error.message });
     throw error;
   }
 }
@@ -481,12 +482,12 @@ npx jest --watch
 3. **Add tests**:
    - Use Supertest for HTTP endpoint testing
 
-### Debugging Restream Issues
+### Debugging Stream Issues
 
 1. **Check logs**: SSE endpoint `/logs/stream` or console output
 2. **Verify FFmpeg**: Ensure binary is in PATH
 3. **Check Playwright**: Validate browser installation
-4. **Review temp directories**: `/tmp/restream-*` for output files
+4. **Review temp directories**: `/tmp/transmux-*` for output files
 5. **Test embed URL manually**: Open in browser to verify accessibility
 6. **Check solver**: Verify Flaresolverr/Byparr is reachable if configured
 
@@ -510,19 +511,18 @@ eventSource.onmessage = (event) => {
 };
 ```
 
-### Pattern: Job Management with Staleness Checks
+### Pattern: Stream Resolution (Short-Lived Browser)
 
-Restream jobs are reused if still valid:
+Stream URLs are detected via short-lived Playwright sessions that close after detection:
 
 ```javascript
-const existingJob = this.jobs.get(channelId);
-if (existingJob && !this.isJobStale(existingJob)) {
-  return existingJob.manifest; // Reuse
-}
-
-// Otherwise, create new job
-const job = await this.createJob(channelId, embedUrl);
-this.jobs.set(channelId, job);
+// 1. Launch short-lived browser session
+// 2. Monitor network traffic for HLS/DASH/MP4 URLs
+// 3. Optionally inspect player config as fallback
+// 4. Close browser context immediately after URL found
+// 5. Return resolved URL for proxying or transmuxing
+const streamUrl = await streamResolver.resolve(embedUrl);
+// Browser is already closed at this point
 ```
 
 ### Pattern: Graceful Degradation
@@ -627,11 +627,11 @@ try {
 
 #### Streams Not Playing
 - **Symptom**: Channels listed but streams fail to load
-- **Cause**: Restream jobs failing, FFmpeg missing, or embed URLs expired
+- **Cause**: Stream resolution failing, FFmpeg missing, or embed URLs expired
 - **Solution**:
   - Check FFmpeg: `which ffmpeg`
   - Check Playwright: `npx playwright install`
-  - Review restream logs for specific errors
+  - Review stream resolution logs for specific errors
   - Test embed URL manually in browser
 
 #### Cloudflare Challenges Blocking Scraper
@@ -644,12 +644,12 @@ try {
 
 #### Memory/CPU High Usage
 - **Symptom**: Server unresponsive or slow
-- **Cause**: Too many concurrent restream jobs or browser contexts
+- **Cause**: Too many concurrent FFmpeg processes or browser contexts
 - **Solution**:
-  - Reduce `HYDRATION_CONCURRENCY`
+  - Reduce `HYDRATION_CONCURRENCY` or `FFMPEG_MAX_CONCURRENT`
   - Increase rebuild interval
   - Monitor with `docker stats` or `htop`
-  - Ensure restream jobs are properly cleaned up
+  - Ensure FFmpeg processes are properly cleaned up
 
 #### Channels Expiring Too Quickly
 - **Symptom**: Channels disappear before events end
@@ -659,9 +659,9 @@ try {
 ### Debugging Strategies
 
 1. **Enable verbose logging**: Check `logger.js` for log levels
-2. **Inspect temp files**: `/tmp/restream-*` and `/tmp/transmux-*`
+2. **Inspect temp files**: `/tmp/transmux-*`
 3. **Test components in isolation**: Use Node.js REPL to test functions
-4. **Check process list**: `ps aux | grep node` to see restream workers
+4. **Check process list**: `ps aux | grep ffmpeg` to see transmux processes
 5. **Monitor network**: Use browser DevTools when testing embeds
 6. **Review recent commits**: Recent changes may have introduced issues
 
@@ -686,15 +686,14 @@ try {
 ### Entry Points
 
 - **`src/server.js`**: HTTP server and API
-- **`src/restream.js`**: Worker process (spawned by restreamer)
 - **`src/public/index.html`**: Frontend entry
 
 ### Critical Paths
 
-- **Channel Build**: `server.js` → `scraper.js` → `channelManager.js`
-- **Hydration**: `channelManager.js` → `restreamer.js` → `restream.js`
+- **Channel Build**: `server.js` → `scraper.js` → `embedResolver.js` → `channelManager.js`
+- **Stream Resolution**: `channelManager.js` → `streamResolver.js` (short-lived Playwright session)
 - **Playlist Serving**: `server.js` → `channelManager.js` → client
-- **Stream Serving**: `server.js` → `channelManager.js` → HLS proxy/transmux/restream
+- **Stream Serving**: `server.js` → `channelManager.js` → HLS proxy or transmux
 
 ---
 
@@ -740,7 +739,7 @@ try {
 
 ## Version Information
 
-**Last Updated**: 2026-01-05
+**Last Updated**: 2026-03-22
 **Node.js Version**: 20+ recommended
 **Playwright Version**: 1.57.0
 **Express Version**: 5.1.0

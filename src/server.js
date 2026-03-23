@@ -245,51 +245,17 @@ async function serveTransmuxedManifest(req, res, channel) {
   }
 }
 
-  async function serveRestreamedManifest(req, res, channel) {
-    try {
-      const job = await channelManager.ensureRestreamed(channel);
-      const manifestBody = await fs.promises.readFile(job.manifestPath, 'utf8');
-      const base = `${req.protocol}://${req.get('host')}/hls/${encodeURIComponent(channel.id)}/local`;
-      const rewritten = channelManager.rewriteLocalManifest(manifestBody, base);
-      res.set('Content-Type', 'application/vnd.apple.mpegurl');
-      return res.send(rewritten);
-    } catch (error) {
-      // Fetch FFmpeg process metrics if available
-      const job = channelManager.streamManager.jobs.get(channel.id);
-      const ffmpegMetrics = job?.ffmpegProcess?.getMetrics?.();
-
-      logger.error('Failed to serve restreamed manifest', {
-        channelId: channel?.id,
-        embedUrl: channel?.embedUrl,
-        error: error.message,
-        stack: error.stack,
-        exitCode: error.exitCode,
-        signal: error.signal,
-        ffmpegState: ffmpegMetrics?.state,
-        ffmpegPid: ffmpegMetrics?.pid,
-        ffmpegUptime: ffmpegMetrics?.uptime,
-        recentErrors: ffmpegMetrics?.recentErrors?.slice(-3),
-      });
-      const detail = error?.message ? `: ${error.message}` : '';
-      return res.status(502).send(`Failed to restream embed${detail}`);
-    }
-  }
-
 app.get('/hls/:id', async (req, res) => {
   const channel = channelManager.getChannelById(req.params.id);
   if (!channel || !channel.streamUrl) {
     return res.status(404).send('Channel not found or stream unavailable');
   }
 
-  if (channelManager.isRestreamChannel(channel)) {
-    return serveRestreamedManifest(req, res, channel);
+  if (channel.streamMode === 'transmux') {
+    return serveTransmuxedManifest(req, res, channel);
   }
 
-  if (channelManager.isHlsChannel(channel)) {
-    return handleHlsResponse(req, res, channel.streamUrl, channel, true);
-  }
-
-  return serveTransmuxedManifest(req, res, channel);
+  return handleHlsResponse(req, res, channel.streamUrl, channel, true);
 });
 
 app.get('/hls/:id/proxy', async (req, res) => {
@@ -300,11 +266,7 @@ app.get('/hls/:id/proxy', async (req, res) => {
     return res.status(404).send('Channel not found or stream unavailable');
   }
 
-  if (channelManager.isRestreamChannel(channel)) {
-    return res.status(400).send('Channel is being restreamed; direct proxy not available');
-  }
-
-  if (!channelManager.isHlsChannel(channel)) {
+  if (channel.streamMode === 'transmux') {
     return res.status(400).send('Channel is being transmuxed; direct proxy not available');
   }
 
@@ -317,7 +279,7 @@ app.get('/hls/:id/proxy', async (req, res) => {
 
 app.get('/hls/:id/local/:segment', async (req, res) => {
   const channel = channelManager.getChannelById(req.params.id);
-  if (!channel || (channelManager.isHlsChannel(channel) && !channelManager.isRestreamChannel(channel))) {
+  if (!channel || channel.streamMode !== 'transmux') {
     return res.status(404).send('Channel not found or not transmuxed');
   }
 

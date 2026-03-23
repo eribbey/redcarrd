@@ -6,7 +6,8 @@ const axios = require('axios');
 const crypto = require('crypto');
 const https = require('https');
 const { createProgrammeFromEvent, buildDefaultStreamHeaders } = require('./scraper');
-const StreamManager = require('./streaming/StreamManager');
+const { StreamResolver } = require('./streamResolver');
+const Transmuxer = require('./transmuxer');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -49,10 +50,8 @@ class ChannelManager {
     this.hydrationConcurrency = Math.max(1, hydrationConcurrency || DEFAULT_HYDRATION_CONCURRENCY);
     this.playlistReady = false;
     this.hydrationInProgress = false;
-    this.streamManager = new StreamManager({
-      logger,
-      maxConcurrent: hydrationConcurrency * 2,
-    });
+    this.streamResolver = new StreamResolver({ logger });
+    this.transmuxer = new Transmuxer({ logger });
   }
 
   async buildChannels(events, selectedCategories = []) {
@@ -144,7 +143,7 @@ class ChannelManager {
       selectedSource: event.sourceOptions?.length
         ? { source: event.sourceOptions[0].source, sourceId: event.sourceOptions[0].sourceId }
         : existing?.selectedSource || null,
-      streamMode: existing?.streamMode || 'restream',
+      streamMode: existing?.streamMode || null,
       expiresAt,
     };
   }
@@ -170,22 +169,16 @@ class ChannelManager {
         if (!channel) break;
 
         try {
-          this.logger?.debug('Restreaming embed for channel', { id: channel.id, embedUrl: channel.embedUrl });
-          const job = await this.ensureRestreamed(channel);
-          if (job) {
-            channel.streamUrl = job.manifestPath;
-            channel.streamMimeType = 'application/vnd.apple.mpegurl';
-            channel.streamMode = 'restream';
-            this.logger?.info(`Restream ready for channel ${channel.id}`, { manifestPath: job.manifestPath });
+          this.logger?.debug('Resolving stream for channel', { id: channel.id, embedUrl: channel.embedUrl });
+          await this.resolveStream(channel);
+          if (channel.streamUrl) {
+            this.logger?.info(`Stream resolved for channel ${channel.id}`, { streamUrl: channel.streamUrl, streamMode: channel.streamMode });
           } else {
-            this.logger?.warn('Restream job could not be created', { id: channel.id });
+            this.logger?.warn('Stream resolution produced no URL', { id: channel.id });
           }
         } catch (error) {
-          this.logger?.warn(`Failed to restream embed for ${channel.id}`, {
+          this.logger?.warn(`Failed to resolve stream for ${channel.id}`, {
             error: error.message,
-            exitCode: error.exitCode,
-            signal: error.signal,
-            stderr: error.stderr,
           });
         }
       }
@@ -209,7 +202,7 @@ class ChannelManager {
       ? { source: selectedOption.source, sourceId: selectedOption.sourceId }
       : channel.selectedSource;
     channel.cookies = [];
-    channel.streamMode = 'restream';
+    channel.streamMode = null;
     this.playlistReady = false;
     this.hydrationInProgress = false;
     this.logger?.info(`Updated source for ${channelId}`, { embedUrl });
@@ -223,7 +216,7 @@ class ChannelManager {
     channel.streamUrl = null;
     channel.requestHeaders = buildDefaultStreamHeaders(embedUrl);
     channel.cookies = [];
-    channel.streamMode = 'restream';
+    channel.streamMode = null;
     this.playlistReady = false;
     this.hydrationInProgress = false;
     this.logger?.info(`Updated quality for ${channelId}`, { embedUrl });
@@ -345,6 +338,13 @@ class ChannelManager {
     const headers = this.buildStreamHeaders(channel);
     this.logger?.debug('Proxying stream fetch', { channelId: channel?.id, targetUrl });
 
+    // Proactive re-resolution if stream URL is approaching TTL
+    if (this.needsReResolution(channel)) {
+      this.resolveStream(channel).catch(err =>
+        this.logger.warn('Background re-resolution failed', { channelId: channel.id, error: err.message })
+      );
+    }
+
     const response = await axios.get(targetUrl, {
       headers,
       responseType: 'arraybuffer',
@@ -353,6 +353,17 @@ class ChannelManager {
     });
 
     this.updateCookies(channel, response.headers['set-cookie']);
+
+    // Trigger re-resolution on upstream rejection
+    if (response.status === 403 || response.status === 410) {
+      this.logger.warn('Upstream rejected request, triggering re-resolution', {
+        channelId: channel.id,
+        status: response.status,
+      });
+      this.resolveStream(channel).catch(err =>
+        this.logger.warn('Re-resolution after rejection failed', { channelId: channel.id, error: err.message })
+      );
+    }
 
     return response;
   }
@@ -394,57 +405,80 @@ class ChannelManager {
     return /mpegurl/i.test(mime) || url.includes('.m3u8');
   }
 
-  isRestreamChannel(channel) {
-    return channel?.streamMode === 'restream';
+  needsReResolution(channel) {
+    if (!channel.resolvedAt || !channel.streamUrl) return true;
+    const ttlMs = (parseInt(process.env.STREAM_URL_TTL_MINUTES) || 30) * 60 * 1000;
+    const age = Date.now() - channel.resolvedAt;
+    return age > ttlMs * 0.8; // Re-resolve at 80% of TTL
+  }
+
+  async resolveStream(channel) {
+    const COOLDOWN_MS = 2 * 60 * 1000;
+    if (channel.lastResolutionAttempt && Date.now() - channel.lastResolutionAttempt < COOLDOWN_MS) {
+      this.logger.warn('Resolution cooldown active', { channelId: channel.id });
+      return;
+    }
+    channel.lastResolutionAttempt = Date.now();
+
+    const result = await this.streamResolver.resolve(channel.embedUrl, {
+      referer: channel.referer || process.env.FRONT_PAGE_URL || 'https://streamed.pk',
+      maxAttempts: parseInt(process.env.RESTREAM_MAX_ATTEMPTS) || 4,
+    });
+
+    if (!result) {
+      this.logger.warn('Stream resolution failed', { channelId: channel.id, embedUrl: channel.embedUrl });
+      return;
+    }
+
+    channel.streamUrl = result.url;
+    channel.streamHeaders = result.headers;
+    channel.streamMode = result.type === 'hls' ? 'hls' : 'transmux';
+    channel.resolvedAt = Date.now();
+
+    this.logger.info('Stream resolved', {
+      channelId: channel.id,
+      type: result.type,
+      streamMode: channel.streamMode,
+    });
   }
 
   async ensureTransmuxed(channel) {
-    // Note: Direct stream URL transmuxing without browser automation
-    // is not yet supported in StreamManager. For now, this returns null
-    // and will be enhanced in future updates.
-    if (!channel?.streamUrl) return null;
-    this.logger?.warn('Direct stream URL transmuxing not yet supported in new StreamManager', {
-      channelId: channel.id,
-    });
-    return null;
-  }
-
-  async ensureRestreamed(channel) {
-    if (!channel?.embedUrl) return null;
-
-    // Check if embedUrl changed and cleanup old job
-    const existing = this.streamManager.jobs.get(channel.id);
-    if (existing && existing.embedUrl !== channel.embedUrl) {
-      this.logger?.info('Embed URL changed, cleaning up old job', {
-        channelId: channel.id,
-        oldUrl: existing.embedUrl,
-        newUrl: channel.embedUrl,
-      });
-      await this.streamManager.cleanupJob(channel.id);
+    if (!channel.streamUrl) {
+      this.logger.warn('No stream URL for transmuxing', { channelId: channel.id });
+      return null;
     }
 
-    const job = await this.streamManager.ensureJob(channel.id, channel.embedUrl, {
-      maxAttempts: parseInt(process.env.RESTREAM_MAX_ATTEMPTS) || 4,
-      enableConfigFallback: process.env.RESTREAM_DETECT_CONFIG_FALLBACK !== 'false',
-    });
-
-    return job;
+    try {
+      const job = await this.transmuxer.ensureJob(
+        channel.id,
+        channel.streamUrl,
+        channel.streamHeaders || {}
+      );
+      return job;
+    } catch (error) {
+      this.logger.error('Transmuxing failed', {
+        channelId: channel.id,
+        streamUrl: channel.streamUrl,
+        error: error.message,
+      });
+      return null;
+    }
   }
 
   getTransmuxJob(channelId) {
-    return this.streamManager.jobs.get(channelId) || null;
+    return this.transmuxer.jobs.get(channelId) || null;
   }
 
   async cleanupTransmuxJobs(ids = []) {
     if (!ids.length) return;
-    this.logger?.info('Evicting stream jobs', { channelIds: ids });
-    await Promise.all(ids.map((id) => this.streamManager.cleanupJob(id)));
+    this.logger?.info('Evicting transmux jobs', { channelIds: ids });
+    await Promise.all(ids.map((id) => this.transmuxer.cleanupJob?.(id)).filter(Boolean));
   }
 
   async cleanupRestreamJobs(ids = []) {
     if (!ids.length) return;
-    this.logger?.info('Evicting stream jobs', { channelIds: ids });
-    await Promise.all(ids.map((id) => this.streamManager.cleanupJob(id)));
+    this.logger?.info('Evicting stream resolver jobs', { channelIds: ids });
+    // StreamResolver doesn't maintain persistent jobs, so this is a no-op
   }
 }
 
