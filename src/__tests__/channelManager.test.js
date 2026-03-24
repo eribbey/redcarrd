@@ -65,7 +65,7 @@ describe('ChannelManager', () => {
     }));
   });
 
-  test('generates playlist and epg', () => {
+  test('generates playlist and epg for healthy channels', () => {
     const manager = new ChannelManager({ lifetimeHours: 24, logger });
     manager.channels = [
       {
@@ -78,6 +78,7 @@ describe('ChannelManager', () => {
         sourceOptions: [],
         qualityOptions: [],
         expiresAt: new Date().toISOString(),
+        status: 'healthy',
       },
     ];
     manager.programmes = [
@@ -89,7 +90,6 @@ describe('ChannelManager', () => {
         stop: new Date(),
       },
     ];
-    manager.playlistReady = true;
     const playlist = manager.generatePlaylist('http://localhost:3005');
     expect(playlist).toContain('#EXTM3U');
     expect(playlist).toContain('/hls/ch-football');
@@ -97,24 +97,6 @@ describe('ChannelManager', () => {
     const epg = manager.generateEpg();
     expect(epg).toContain('<tv>');
     expect(epg).toContain('ch-football');
-  });
-
-  test('returns placeholder playlist when hydration not finished', () => {
-    const manager = new ChannelManager({ lifetimeHours: 24, logger });
-    manager.channels = [
-      {
-        id: 'ch-football',
-        category: 'football',
-        title: 'A',
-        embedUrl: 'https://example.com/embed/a',
-        streamUrl: null,
-        sourceOptions: [],
-        qualityOptions: [],
-        expiresAt: new Date().toISOString(),
-      },
-    ];
-    const playlist = manager.generatePlaylist('http://localhost:3005');
-    expect(playlist).toContain('Playlist is still hydrating');
   });
 
   describe('resolveStream()', () => {
@@ -161,19 +143,6 @@ describe('ChannelManager', () => {
       expect(channel.streamMode).toBe('transmux');
     });
 
-    test('should respect cooldown period', async () => {
-      const mockResolver = { resolve: jest.fn(), close: jest.fn() };
-      channelManager.streamResolver = mockResolver;
-
-      const channel = {
-        id: 'test-3',
-        embedUrl: 'https://embed.example.com/player/3',
-        lastResolutionAttempt: Date.now() - 30000, // 30 seconds ago
-      };
-      await channelManager.resolveStream(channel);
-
-      expect(mockResolver.resolve).not.toHaveBeenCalled();
-    });
   });
 
   describe('ensureTransmuxed()', () => {
@@ -212,42 +181,6 @@ describe('ChannelManager', () => {
       const channel = { id: 'test-2', streamMode: 'transmux' };
       const result = await channelManager.ensureTransmuxed(channel);
       expect(result).toBeNull();
-    });
-  });
-
-  describe('stream URL TTL', () => {
-    let channelManager;
-
-    beforeEach(() => {
-      channelManager = new ChannelManager({ lifetimeHours: 24, logger });
-    });
-
-    test('should need re-resolution when URL reaches 80% of TTL', () => {
-      const channel = {
-        id: 'test-1',
-        streamUrl: 'https://cdn.example.com/stream.m3u8',
-        resolvedAt: Date.now() - (25 * 60 * 1000), // 25 min ago (past 80% of 30 min TTL)
-      };
-      expect(channelManager.needsReResolution(channel)).toBe(true);
-    });
-
-    test('should not need re-resolution when URL is fresh', () => {
-      const channel = {
-        id: 'test-2',
-        streamUrl: 'https://cdn.example.com/stream.m3u8',
-        resolvedAt: Date.now() - (5 * 60 * 1000), // 5 min ago
-      };
-      expect(channelManager.needsReResolution(channel)).toBe(false);
-    });
-
-    test('should need re-resolution when no resolvedAt', () => {
-      const channel = { id: 'test-3', streamUrl: 'https://cdn.example.com/stream.m3u8' };
-      expect(channelManager.needsReResolution(channel)).toBe(true);
-    });
-
-    test('should need re-resolution when no streamUrl', () => {
-      const channel = { id: 'test-4', resolvedAt: Date.now() };
-      expect(channelManager.needsReResolution(channel)).toBe(true);
     });
   });
 
@@ -295,6 +228,20 @@ describe('ChannelManager', () => {
     await manager.buildChannels(events, ['football']);
     expect(manager.channels[0].status).toBe('pending');
     expect(manager.channels[0].failCount).toBe(0);
+  });
+
+  test('generatePlaylist returns healthy channels without playlistReady gate', () => {
+    const manager = new ChannelManager({ lifetimeHours: 24, logger });
+    manager.channels = [
+      { id: 'ch-1', category: 'football', title: 'Game A', streamUrl: 'https://stream.test/a.m3u8', status: 'healthy' },
+      { id: 'ch-2', category: 'football', title: 'Game B', streamUrl: 'https://stream.test/b.m3u8', status: 'resolved' },
+      { id: 'ch-3', category: 'football', title: 'Game C', streamUrl: null, status: 'pending' },
+    ];
+
+    const playlist = manager.generatePlaylist('http://localhost:3005');
+    expect(playlist).toContain('ch-1');
+    expect(playlist).not.toContain('ch-2');
+    expect(playlist).not.toContain('ch-3');
   });
 
   test('retains upstream cookies across proxied HLS requests', async () => {

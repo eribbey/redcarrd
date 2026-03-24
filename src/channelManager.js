@@ -12,7 +12,6 @@ const Transmuxer = require('./transmuxer');
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-const DEFAULT_HYDRATION_CONCURRENCY = 5;
 const MAX_COOKIES_PER_CHANNEL = 50;
 
 // SSL verification configuration
@@ -39,7 +38,6 @@ class ChannelManager {
     logger,
     frontPageUrl,
     timezoneName = 'UTC',
-    hydrationConcurrency = DEFAULT_HYDRATION_CONCURRENCY,
   }) {
     this.channels = [];
     this.programmes = [];
@@ -47,11 +45,9 @@ class ChannelManager {
     this.logger = logger;
     this.frontPageUrl = frontPageUrl;
     this.timezone = timezoneName;
-    this.hydrationConcurrency = Math.max(1, hydrationConcurrency || DEFAULT_HYDRATION_CONCURRENCY);
-    this.playlistReady = false;
-    this.hydrationInProgress = false;
     this.streamResolver = new StreamResolver({ logger });
     this.transmuxer = new Transmuxer({ logger });
+    this.running = true;
   }
 
   async buildChannels(events, selectedCategories = []) {
@@ -98,8 +94,6 @@ class ChannelManager {
 
     this.channels = channels;
     this.programmes = programmes;
-    this.playlistReady = false;
-    this.hydrationInProgress = false;
     const removedIds = removedChannels.map((channel) => channel.id);
     this.cleanupTransmuxJobs(removedIds);
     this.cleanupRestreamJobs(removedIds);
@@ -161,49 +155,6 @@ class ChannelManager {
     };
   }
 
-  async hydrateStreams() {
-    if (!this.channels.length) {
-      this.playlistReady = true;
-      this.hydrationInProgress = false;
-      return this.channels;
-    }
-
-    this.hydrationInProgress = true;
-    this.playlistReady = false;
-
-    const workerCount = Math.min(this.hydrationConcurrency, this.channels.length);
-    let currentIndex = 0;
-
-    const worker = async () => {
-      while (true) {
-        const index = currentIndex;
-        currentIndex += 1;
-        const channel = this.channels[index];
-        if (!channel) break;
-
-        try {
-          this.logger?.debug('Resolving stream for channel', { id: channel.id, embedUrl: channel.embedUrl });
-          await this.resolveStream(channel);
-          if (channel.streamUrl) {
-            this.logger?.info(`Stream resolved for channel ${channel.id}`, { streamUrl: channel.streamUrl, streamMode: channel.streamMode });
-          } else {
-            this.logger?.warn('Stream resolution produced no URL', { id: channel.id });
-          }
-        } catch (error) {
-          this.logger?.warn(`Failed to resolve stream for ${channel.id}`, {
-            error: error.message,
-          });
-        }
-      }
-    };
-
-    await Promise.all(Array.from({ length: workerCount }, worker));
-    this.hydrationInProgress = false;
-    this.playlistReady = true;
-    this.logger?.info('playlist.m3u8 is ready', { channelCount: this.channels.length });
-    return this.channels;
-  }
-
   selectSource(channelId, embedUrl) {
     const channel = this.channels.find((c) => c.id === channelId);
     if (!channel) return null;
@@ -216,8 +167,10 @@ class ChannelManager {
       : channel.selectedSource;
     channel.cookies = [];
     channel.streamMode = null;
-    this.playlistReady = false;
-    this.hydrationInProgress = false;
+    channel.status = 'pending';
+    channel.failCount = 0;
+    channel.nextRetryAt = null;
+    channel.healthFailCount = 0;
     this.logger?.info(`Updated source for ${channelId}`, { embedUrl });
     return channel;
   }
@@ -230,21 +183,18 @@ class ChannelManager {
     channel.requestHeaders = buildDefaultStreamHeaders(embedUrl);
     channel.cookies = [];
     channel.streamMode = null;
-    this.playlistReady = false;
-    this.hydrationInProgress = false;
+    channel.status = 'pending';
+    channel.failCount = 0;
+    channel.nextRetryAt = null;
+    channel.healthFailCount = 0;
     this.logger?.info(`Updated quality for ${channelId}`, { embedUrl });
     return channel;
   }
 
   generatePlaylist(baseUrl) {
-    if (!this.playlistReady) {
-      this.logger?.warn('Attempted to generate playlist before streams were hydrated');
-      return '#EXTM3U\n# Playlist is still hydrating';
-    }
-
     const lines = ['#EXTM3U'];
     this.channels
-      .filter((ch) => ch.streamUrl)
+      .filter((ch) => ch.status === 'healthy' && ch.streamUrl)
       .forEach((channel) => {
         lines.push(
           `#EXTINF:-1 tvg-id="${channel.id}" group-title="${channel.category}",${channel.title || channel.category}`,
@@ -256,7 +206,11 @@ class ChannelManager {
 
   generateEpg() {
     const xml = create('tv', { version: '1.0', encoding: 'UTF-8' });
-    this.channels.forEach((channel) => {
+    const healthyIds = new Set(
+      this.channels.filter((ch) => ch.status === 'healthy').map((ch) => ch.id)
+    );
+
+    this.channels.filter((ch) => healthyIds.has(ch.id)).forEach((channel) => {
       xml
         .ele('channel', { id: channel.id })
         .ele('display-name')
@@ -265,7 +219,7 @@ class ChannelManager {
         .up();
     });
 
-    this.programmes.forEach((programme) => {
+    this.programmes.filter((p) => healthyIds.has(p.channelId)).forEach((programme) => {
       xml
         .ele('programme', {
           start: dayjs(programme.start).tz(this.timezone).format('YYYYMMDDHHmmss ZZ'),
@@ -351,13 +305,6 @@ class ChannelManager {
     const headers = this.buildStreamHeaders(channel);
     this.logger?.debug('Proxying stream fetch', { channelId: channel?.id, targetUrl });
 
-    // Proactive re-resolution if stream URL is approaching TTL
-    if (this.needsReResolution(channel)) {
-      this.resolveStream(channel).catch(err =>
-        this.logger.warn('Background re-resolution failed', { channelId: channel.id, error: err.message })
-      );
-    }
-
     const response = await axios.get(targetUrl, {
       headers,
       responseType: 'arraybuffer',
@@ -367,19 +314,14 @@ class ChannelManager {
 
     this.updateCookies(channel, response.headers['set-cookie']);
 
-    // Trigger re-resolution on upstream rejection
     if (response.status === 403 || response.status === 410) {
-      this.logger.warn('Upstream rejected request, triggering re-resolution', {
+      this.logger.warn('Upstream rejected request', {
         channelId: channel.id,
         status: response.status,
       });
-      // Clear the dead stream URL so the channel shows as unavailable
-      // until re-resolution completes, preventing a retry storm
       channel.streamUrl = null;
       channel.resolvedAt = null;
-      this.resolveStream(channel).catch(err =>
-        this.logger.warn('Re-resolution after rejection failed', { channelId: channel.id, error: err.message })
-      );
+      channel.status = 'pending';
       const err = new Error(`Upstream returned ${response.status}`);
       err.upstreamStatus = response.status;
       throw err;
@@ -425,21 +367,7 @@ class ChannelManager {
     return /mpegurl/i.test(mime) || url.includes('.m3u8');
   }
 
-  needsReResolution(channel) {
-    if (!channel.resolvedAt || !channel.streamUrl) return true;
-    const ttlMs = (parseInt(process.env.STREAM_URL_TTL_MINUTES) || 30) * 60 * 1000;
-    const age = Date.now() - channel.resolvedAt;
-    return age > ttlMs * 0.8; // Re-resolve at 80% of TTL
-  }
-
   async resolveStream(channel) {
-    const COOLDOWN_MS = 2 * 60 * 1000;
-    if (channel.lastResolutionAttempt && Date.now() - channel.lastResolutionAttempt < COOLDOWN_MS) {
-      this.logger.warn('Resolution cooldown active', { channelId: channel.id });
-      return;
-    }
-    channel.lastResolutionAttempt = Date.now();
-
     const result = await this.streamResolver.resolve(channel.embedUrl, {
       referer: channel.referer || process.env.FRONT_PAGE_URL || 'https://streamed.pk',
       maxAttempts: parseInt(process.env.RESTREAM_MAX_ATTEMPTS) || 4,
@@ -447,7 +375,7 @@ class ChannelManager {
 
     if (!result) {
       this.logger.warn('Stream resolution failed', { channelId: channel.id, embedUrl: channel.embedUrl });
-      return;
+      return null;
     }
 
     channel.streamUrl = result.url;
@@ -460,6 +388,8 @@ class ChannelManager {
       type: result.type,
       streamMode: channel.streamMode,
     });
+
+    return result;
   }
 
   async ensureTransmuxed(channel) {
