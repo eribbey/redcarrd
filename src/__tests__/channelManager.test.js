@@ -244,6 +244,101 @@ describe('ChannelManager', () => {
     expect(playlist).not.toContain('ch-3');
   });
 
+  describe('getNextChannelForResolution', () => {
+    test('prioritizes pending over failed over expiring', () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+      const now = Date.now();
+      manager.channels = [
+        { id: 'ch-expiring', status: 'healthy', streamUrl: 'https://s.test/a.m3u8', resolvedAt: now - 25 * 60 * 1000, failCount: 0 },
+        { id: 'ch-failed', status: 'failed', failCount: 1, nextRetryAt: now - 1000 },
+        { id: 'ch-pending', status: 'pending', failCount: 0 },
+      ];
+
+      const next = manager.getNextChannelForResolution();
+      expect(next.id).toBe('ch-pending');
+    });
+
+    test('respects backoff for failed channels', () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+      manager.channels = [
+        { id: 'ch-failed', status: 'failed', failCount: 1, nextRetryAt: Date.now() + 60000 },
+      ];
+
+      const next = manager.getNextChannelForResolution();
+      expect(next).toBeNull();
+    });
+
+    test('returns null when no channels need resolution', () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+      manager.channels = [
+        { id: 'ch-healthy', status: 'healthy', streamUrl: 'https://s.test/a.m3u8', resolvedAt: Date.now(), failCount: 0 },
+      ];
+
+      const next = manager.getNextChannelForResolution();
+      expect(next).toBeNull();
+    });
+
+    test('skips dead channels', () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+      manager.channels = [
+        { id: 'ch-dead', status: 'dead', failCount: 5 },
+      ];
+
+      const next = manager.getNextChannelForResolution();
+      expect(next).toBeNull();
+    });
+  });
+
+  describe('resolution loop', () => {
+    test('resolveAndUpdateStatus sets resolved on success', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+      manager.streamResolver = {
+        resolve: jest.fn().mockResolvedValue({ url: 'https://s.test/live.m3u8', type: 'hls', headers: {} }),
+      };
+
+      const channel = { id: 'ch-1', status: 'pending', embedUrl: 'https://embed.test/1', failCount: 0, healthFailCount: 0 };
+      manager.channels = [channel];
+
+      await manager.resolveAndUpdateStatus(channel);
+
+      expect(channel.status).toBe('resolved');
+      expect(channel.streamUrl).toBe('https://s.test/live.m3u8');
+      expect(channel.failCount).toBe(0);
+      expect(channel.resolvedAt).toBeGreaterThan(0);
+    });
+
+    test('resolveAndUpdateStatus sets failed with backoff on failure', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+      manager.streamResolver = {
+        resolve: jest.fn().mockResolvedValue(null),
+      };
+
+      const channel = { id: 'ch-1', status: 'pending', embedUrl: 'https://embed.test/1', failCount: 0, healthFailCount: 0 };
+      manager.channels = [channel];
+
+      await manager.resolveAndUpdateStatus(channel);
+
+      expect(channel.status).toBe('failed');
+      expect(channel.failCount).toBe(1);
+      expect(channel.nextRetryAt).toBeGreaterThan(Date.now());
+    });
+
+    test('resolveAndUpdateStatus sets dead after max failures', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+      manager.streamResolver = {
+        resolve: jest.fn().mockResolvedValue(null),
+      };
+
+      const channel = { id: 'ch-1', status: 'failed', embedUrl: 'https://embed.test/1', failCount: 4, healthFailCount: 0 };
+      manager.channels = [channel];
+
+      await manager.resolveAndUpdateStatus(channel);
+
+      expect(channel.status).toBe('dead');
+      expect(channel.failCount).toBe(5);
+    });
+  });
+
   test('retains upstream cookies across proxied HLS requests', async () => {
     const manager = new ChannelManager({ lifetimeHours: 24, logger });
     const channel = {

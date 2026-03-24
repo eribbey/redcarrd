@@ -425,6 +425,87 @@ class ChannelManager {
     await Promise.all(ids.map((id) => this.transmuxer.cleanupJob?.(id)).filter(Boolean));
   }
 
+  getNextChannelForResolution() {
+    const now = Date.now();
+    const ttlMs = (parseInt(process.env.STREAM_URL_TTL_MINUTES) || 30) * 60 * 1000;
+    const maxFailures = parseInt(process.env.RESOLUTION_MAX_FAILURES) || 5;
+
+    // Priority 1: pending channels
+    const pending = this.channels.filter((ch) => ch.status === 'pending');
+    if (pending.length) return pending[pending.length - 1]; // newest first
+
+    // Priority 2: failed channels past their backoff
+    const retriable = this.channels.filter(
+      (ch) => ch.status === 'failed' && ch.failCount < maxFailures && (!ch.nextRetryAt || now >= ch.nextRetryAt)
+    );
+    if (retriable.length) return retriable[0];
+
+    // Priority 3: expiring channels (>80% of TTL)
+    const expiring = this.channels.filter(
+      (ch) => (ch.status === 'healthy' || ch.status === 'resolved') &&
+              ch.streamUrl && ch.resolvedAt && (now - ch.resolvedAt > ttlMs * 0.8)
+    );
+    if (expiring.length) return expiring[0];
+
+    return null;
+  }
+
+  async resolveAndUpdateStatus(channel) {
+    const maxFailures = parseInt(process.env.RESOLUTION_MAX_FAILURES) || 5;
+    const BACKOFF_STEPS = [30000, 60000, 120000, 300000, 600000]; // 30s, 1m, 2m, 5m, 10m
+
+    try {
+      const result = await this.resolveStream(channel);
+
+      if (result) {
+        channel.status = 'resolved';
+        channel.failCount = 0;
+        channel.nextRetryAt = null;
+        this.logger.info('Channel resolved', { channelId: channel.id, streamUrl: result.url });
+      } else {
+        channel.failCount = (channel.failCount || 0) + 1;
+        if (channel.failCount >= maxFailures) {
+          channel.status = 'dead';
+          this.logger.warn('Channel marked dead after max failures', { channelId: channel.id, failCount: channel.failCount });
+        } else {
+          channel.status = 'failed';
+          const backoffMs = BACKOFF_STEPS[Math.min(channel.failCount - 1, BACKOFF_STEPS.length - 1)];
+          channel.nextRetryAt = Date.now() + backoffMs;
+          this.logger.info('Channel resolution failed, will retry', { channelId: channel.id, failCount: channel.failCount, nextRetryIn: backoffMs });
+        }
+      }
+    } catch (error) {
+      channel.failCount = (channel.failCount || 0) + 1;
+      if (channel.failCount >= maxFailures) {
+        channel.status = 'dead';
+        this.logger.warn('Channel marked dead after max failures', { channelId: channel.id, failCount: channel.failCount });
+      } else {
+        channel.status = 'failed';
+        const backoffMs = BACKOFF_STEPS[Math.min(channel.failCount - 1, BACKOFF_STEPS.length - 1)];
+        channel.nextRetryAt = Date.now() + backoffMs;
+        this.logger.warn('Channel resolution threw error', { channelId: channel.id, error: error.message, failCount: channel.failCount });
+      }
+    }
+  }
+
+  async runResolutionLoop() {
+    const sleepMs = parseInt(process.env.RESOLUTION_LOOP_SLEEP_MS) || 2000;
+
+    this.logger.info('Resolution loop started');
+
+    while (this.running) {
+      const channel = this.getNextChannelForResolution();
+
+      if (channel) {
+        await this.resolveAndUpdateStatus(channel);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, sleepMs));
+    }
+
+    this.logger.info('Resolution loop stopped');
+  }
+
   async cleanupRestreamJobs(ids = []) {
     if (!ids.length) return;
     this.logger?.info('Evicting stream resolver jobs', { channelIds: ids });
