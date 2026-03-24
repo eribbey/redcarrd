@@ -467,4 +467,57 @@ describe('ChannelManager', () => {
       expect.objectContaining({ headers: expect.objectContaining({ Cookie: 'sid=abc123; region=us' }) }),
     );
   });
+
+  describe('lifecycle integration', () => {
+    test('channel goes from pending to resolved to healthy', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+      manager.streamResolver = {
+        resolve: jest.fn().mockResolvedValue({ url: 'https://s.test/live.m3u8', type: 'hls', headers: {} }),
+      };
+
+      await manager.buildChannels([
+        { title: 'Game', startTime: '2024-01-01T12:00:00Z', category: 'football', embedUrl: 'https://embed.test/1', sourceOptions: [], qualityOptions: [] },
+      ], ['football']);
+      expect(manager.channels[0].status).toBe('pending');
+
+      let playlist = manager.generatePlaylist('http://localhost:3005');
+      expect(playlist).not.toContain('ch-');
+
+      const channel = manager.getNextChannelForResolution();
+      expect(channel).not.toBeNull();
+      await manager.resolveAndUpdateStatus(channel);
+      expect(channel.status).toBe('resolved');
+
+      playlist = manager.generatePlaylist('http://localhost:3005');
+      expect(playlist).not.toContain('ch-');
+
+      const hlsManifest = '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment0.ts\n';
+      axios.get.mockResolvedValue({ status: 200, data: Buffer.from(hlsManifest), headers: {} });
+      await manager.checkChannelHealth(channel);
+      expect(channel.status).toBe('healthy');
+
+      playlist = manager.generatePlaylist('http://localhost:3005');
+      expect(playlist).toContain(channel.id);
+    });
+
+    test('channel removed from playlist when health check fails', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+
+      manager.channels = [{
+        id: 'ch-test', category: 'football', title: 'Game', embedUrl: 'https://embed.test/1',
+        streamUrl: 'https://s.test/live.m3u8', streamMode: 'hls', status: 'healthy',
+        requestHeaders: {}, streamHeaders: {}, cookies: [], healthFailCount: 0, healthFailTimestamps: [],
+      }];
+
+      let playlist = manager.generatePlaylist('http://localhost:3005');
+      expect(playlist).toContain('ch-test');
+
+      axios.get.mockResolvedValue({ status: 403, data: Buffer.from(''), headers: {} });
+      await manager.checkChannelHealth(manager.channels[0]);
+
+      playlist = manager.generatePlaylist('http://localhost:3005');
+      expect(playlist).not.toContain('ch-test');
+      expect(manager.channels[0].status).toBe('pending');
+    });
+  });
 });
