@@ -506,6 +506,107 @@ class ChannelManager {
     this.logger.info('Resolution loop stopped');
   }
 
+  async checkChannelHealth(channel) {
+    const rapidFailThreshold = parseInt(process.env.HEALTH_RAPID_FAIL_THRESHOLD) || 3;
+    const rapidFailWindowMs = parseInt(process.env.HEALTH_RAPID_FAIL_WINDOW_MS) || 600000;
+
+    try {
+      const headers = this.buildStreamHeaders(channel);
+      const isHls = this.isHlsChannel(channel);
+
+      let healthy;
+      if (isHls) {
+        const response = await axios.get(channel.streamUrl, {
+          headers,
+          responseType: 'arraybuffer',
+          timeout: 10000,
+          validateStatus: (status) => status >= 200 && status < 500,
+          httpsAgent: createHttpsAgent(),
+        });
+        healthy = response.status >= 200 && response.status < 300;
+        if (healthy) {
+          const body = response.data?.toString('utf8') || '';
+          healthy = body.includes('#EXTINF');
+        }
+      } else {
+        const response = await axios.head(channel.streamUrl, {
+          headers,
+          timeout: 10000,
+          validateStatus: (status) => status >= 200 && status < 500,
+          httpsAgent: createHttpsAgent(),
+        });
+        healthy = response.status >= 200 && response.status < 300;
+      }
+
+      if (healthy) {
+        channel.status = 'healthy';
+        channel.lastHealthCheck = Date.now();
+      } else {
+        this._markUnhealthy(channel, 'non-2xx or invalid manifest', rapidFailThreshold, rapidFailWindowMs);
+      }
+    } catch (error) {
+      this._markUnhealthy(channel, error.message, rapidFailThreshold, rapidFailWindowMs);
+    }
+  }
+
+  _markUnhealthy(channel, reason, rapidFailThreshold, rapidFailWindowMs) {
+    const now = Date.now();
+
+    if (!channel.healthFailTimestamps) channel.healthFailTimestamps = [];
+    channel.healthFailTimestamps.push(now);
+
+    // Prune timestamps outside the window
+    channel.healthFailTimestamps = channel.healthFailTimestamps.filter(
+      (ts) => now - ts < rapidFailWindowMs
+    );
+
+    if (channel.healthFailTimestamps.length >= rapidFailThreshold) {
+      channel.status = 'dead';
+      this.logger.warn('Channel marked dead after rapid health failures', {
+        channelId: channel.id,
+        failuresInWindow: channel.healthFailTimestamps.length,
+        reason,
+      });
+    } else {
+      channel.status = 'pending';
+      channel.streamUrl = null;
+      channel.resolvedAt = null;
+      channel.failCount = 0;
+      channel.nextRetryAt = null;
+      this.logger.warn('Channel health check failed, queued for re-resolution', {
+        channelId: channel.id, reason,
+        failuresInWindow: channel.healthFailTimestamps.length,
+      });
+    }
+  }
+
+  async runHealthCheckLoop() {
+    const intervalSeconds = parseInt(process.env.HEALTH_CHECK_INTERVAL_SECONDS) || 30;
+
+    this.logger.info('Health check loop started', { intervalSeconds });
+
+    while (this.running) {
+      const checkable = this.channels.filter(
+        (ch) => ch.status === 'resolved' || ch.status === 'healthy'
+      );
+
+      for (const channel of checkable) {
+        if (!this.running) break;
+        await this.checkChannelHealth(channel);
+      }
+
+      // Clean up transmux jobs for channels that went unhealthy
+      const unhealthyIds = this.channels
+        .filter((ch) => ch.status !== 'healthy' && ch.status !== 'resolved')
+        .map((ch) => ch.id);
+      await this.cleanupTransmuxJobs(unhealthyIds);
+
+      await new Promise((resolve) => setTimeout(resolve, intervalSeconds * 1000));
+    }
+
+    this.logger.info('Health check loop stopped');
+  }
+
   async cleanupRestreamJobs(ids = []) {
     if (!ids.length) return;
     this.logger?.info('Evicting stream resolver jobs', { channelIds: ids });

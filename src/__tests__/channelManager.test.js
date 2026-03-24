@@ -339,6 +339,104 @@ describe('ChannelManager', () => {
     });
   });
 
+  describe('checkChannelHealth', () => {
+    test('marks HLS channel healthy when manifest contains segments', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+      const hlsManifest = '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment0.ts\n';
+
+      axios.get.mockResolvedValue({
+        status: 200,
+        data: Buffer.from(hlsManifest),
+        headers: {},
+      });
+
+      const channel = {
+        id: 'ch-1', status: 'resolved', streamUrl: 'https://s.test/live.m3u8',
+        streamMode: 'hls', embedUrl: 'https://embed.test/1',
+        requestHeaders: {}, streamHeaders: {}, cookies: [],
+        healthFailCount: 0, healthFailTimestamps: [],
+      };
+
+      await manager.checkChannelHealth(channel);
+      expect(channel.status).toBe('healthy');
+      expect(channel.lastHealthCheck).toBeGreaterThan(0);
+    });
+
+    test('marks HLS channel unhealthy when manifest is empty', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+
+      axios.get.mockResolvedValue({
+        status: 200,
+        data: Buffer.from('#EXTM3U\n'),
+        headers: {},
+      });
+
+      const channel = {
+        id: 'ch-1', status: 'resolved', streamUrl: 'https://s.test/live.m3u8',
+        streamMode: 'hls', embedUrl: 'https://embed.test/1',
+        requestHeaders: {}, streamHeaders: {}, cookies: [],
+        healthFailCount: 0, healthFailTimestamps: [],
+      };
+
+      await manager.checkChannelHealth(channel);
+      expect(channel.status).toBe('pending');
+      expect(channel.streamUrl).toBeNull();
+    });
+
+    test('marks channel unhealthy on 403', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+
+      axios.get.mockResolvedValue({ status: 403, data: Buffer.from(''), headers: {} });
+
+      const channel = {
+        id: 'ch-1', status: 'healthy', streamUrl: 'https://s.test/live.m3u8',
+        streamMode: 'hls', embedUrl: 'https://embed.test/1',
+        requestHeaders: {}, streamHeaders: {}, cookies: [],
+        healthFailCount: 0, healthFailTimestamps: [],
+      };
+
+      await manager.checkChannelHealth(channel);
+      expect(channel.status).toBe('pending');
+      expect(channel.streamUrl).toBeNull();
+    });
+
+    test('marks channel dead after rapid fail cycles within time window', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+
+      axios.get.mockResolvedValue({ status: 403, data: Buffer.from(''), headers: {} });
+
+      const now = Date.now();
+      const channel = {
+        id: 'ch-1', status: 'healthy', streamUrl: 'https://s.test/live.m3u8',
+        streamMode: 'hls', embedUrl: 'https://embed.test/1',
+        requestHeaders: {}, streamHeaders: {}, cookies: [],
+        healthFailCount: 0,
+        healthFailTimestamps: [now - 120000, now - 60000], // 2 recent failures within window
+      };
+
+      await manager.checkChannelHealth(channel);
+      expect(channel.status).toBe('dead');
+    });
+
+    test('does not mark dead if failures are outside time window', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+
+      axios.get.mockResolvedValue({ status: 403, data: Buffer.from(''), headers: {} });
+
+      const now = Date.now();
+      const channel = {
+        id: 'ch-1', status: 'healthy', streamUrl: 'https://s.test/live.m3u8',
+        streamMode: 'hls', embedUrl: 'https://embed.test/1',
+        requestHeaders: {}, streamHeaders: {}, cookies: [],
+        healthFailCount: 0,
+        healthFailTimestamps: [now - 700000, now - 650000], // old failures outside 10min window
+      };
+
+      await manager.checkChannelHealth(channel);
+      expect(channel.status).toBe('pending');
+    });
+  });
+
   test('retains upstream cookies across proxied HLS requests', async () => {
     const manager = new ChannelManager({ lifetimeHours: 24, logger });
     const channel = {
