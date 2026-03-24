@@ -11,7 +11,6 @@ const { scrapeFrontPage } = require('./scraper');
 
 const PORT = process.env.PORT || 3005;
 const FRONT_PAGE_URL = process.env.FRONT_PAGE_URL || 'https://streamed.pk';
-const HYDRATION_CONCURRENCY = Number(process.env.HYDRATION_CONCURRENCY) || 5;
 
 const app = express();
 const logger = new Logger();
@@ -29,15 +28,14 @@ const channelManager = new ChannelManager({
   logger,
   frontPageUrl: FRONT_PAGE_URL,
   timezoneName: config.timezone || defaultConfig.timezone,
-  hydrationConcurrency: HYDRATION_CONCURRENCY,
 });
 
-async function rebuildChannels() {
+async function refreshEvents() {
   const timezone = config.timezone || defaultConfig.timezone;
   const metaContext = { frontPageUrl: FRONT_PAGE_URL, timezone };
 
   try {
-    logger.info('Starting channel rebuild', metaContext);
+    logger.info('Starting event refresh', metaContext);
 
     const events = await scrapeFrontPage(FRONT_PAGE_URL, timezone, logger);
     const categoryCounts = events.reduce((acc, event) => {
@@ -51,50 +49,53 @@ async function rebuildChannels() {
       logger.warn('No events parsed from front page', metaContext);
     }
 
-    try {
-      logger.info('Building channels from events', { ...metaContext, totalEvents: events.length });
-      await channelManager.buildChannels(events, config.categories);
-      logger.info('Channels built', { ...metaContext, channelCount: channelManager.channels.length });
-    } catch (error) {
-      logger.error('Failed to build channels', { ...metaContext, error: error.message, stack: error.stack });
-      return;
-    }
-
-    try {
-      logger.info('Hydrating channel streams', { ...metaContext, channelCount: channelManager.channels.length });
-      await channelManager.hydrateStreams();
-      logger.info('Hydrated channel streams', { ...metaContext, channelCount: channelManager.channels.length });
-    } catch (error) {
-      logger.error('Failed to hydrate streams', { ...metaContext, error: error.message, stack: error.stack });
-      return;
-    }
-
+    await channelManager.buildChannels(events, config.categories);
     lastRebuild = new Date().toISOString();
-    logger.info('Channel rebuild completed', { ...metaContext, count: channelManager.channels.length });
+    logger.info('Event refresh completed', { ...metaContext, channelCount: channelManager.channels.length });
   } catch (error) {
-    logger.error('Failed to rebuild channels', { ...metaContext, error: error.message, stack: error.stack });
+    logger.error('Failed to refresh events', { ...metaContext, error: error.message, stack: error.stack });
   }
 }
 
-let rebuildInterval = null;
-function scheduleRebuild() {
-  if (rebuildInterval) clearInterval(rebuildInterval);
-  const minutes = config.rebuildIntervalMinutes || defaultConfig.rebuildIntervalMinutes;
-  rebuildInterval = setInterval(rebuildChannels, minutes * 60 * 1000);
-  logger.info(`Scheduled rebuild every ${minutes} minutes`);
+let eventLoopTimer = null;
+function scheduleEventLoop() {
+  if (eventLoopTimer) clearInterval(eventLoopTimer);
+  const minutes = parseInt(process.env.EVENT_POLL_INTERVAL_MINUTES) || config.rebuildIntervalMinutes || defaultConfig.rebuildIntervalMinutes;
+  eventLoopTimer = setInterval(refreshEvents, minutes * 60 * 1000);
+  logger.info(`Scheduled event refresh every ${minutes} minutes`);
 }
 
-scheduleRebuild();
-rebuildChannels();
+(async () => {
+  await refreshEvents();
+  scheduleEventLoop();
+  channelManager.runResolutionLoop();
+  channelManager.runHealthCheckLoop();
+})();
+
+function shutdown(signal) {
+  logger.info(`Received ${signal}, shutting down gracefully`);
+  channelManager.running = false;
+  if (eventLoopTimer) clearInterval(eventLoopTimer);
+  channelManager.streamResolver.closeBrowser().then(() => {
+    process.exit(0);
+  });
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 app.get('/api/state', (req, res) => {
+  const statusCounts = channelManager.channels.reduce((acc, ch) => {
+    acc[ch.status] = (acc[ch.status] || 0) + 1;
+    return acc;
+  }, {});
+
   res.json({
     config,
     channels: channelManager.channels,
     logs: logger.getEntries(),
     lastRebuild,
-    playlistReady: channelManager.playlistReady,
-    hydrating: channelManager.hydrationInProgress,
+    statusCounts,
   });
 });
 
@@ -161,12 +162,12 @@ app.post('/api/config', (req, res) => {
   }
 
   saveConfig(config, logger);
-  scheduleRebuild();
+  scheduleEventLoop();
   res.json({ config });
 });
 
 app.post('/api/rebuild', async (req, res) => {
-  await rebuildChannels();
+  await refreshEvents();
   res.json({ status: 'ok', lastRebuild });
 });
 
@@ -183,10 +184,6 @@ app.post('/api/channel/:id/quality', async (req, res) => {
 });
 
 app.get('/playlist.m3u8', (req, res) => {
-  if (!channelManager.playlistReady) {
-    return res.status(503).send('#EXTM3U\n# Playlist not ready. Streams are still being resolved.');
-  }
-
   res.set('Content-Type', 'application/x-mpegurl');
   res.send(channelManager.generatePlaylist(`${req.protocol}://${req.get('host')}`));
 });
@@ -217,13 +214,19 @@ async function handleHlsResponse(req, res, targetUrl, channel, isRootManifest = 
     res.set('Content-Type', contentType);
     return res.send(response.data);
   } catch (error) {
+    // Return 503 for upstream rejections so IPTV clients back off
+    const status = error.upstreamStatus === 403 || error.upstreamStatus === 410 ? 503 : 502;
     logger.error('Failed to proxy HLS request', {
       channelId: channel?.id,
       targetUrl,
-      status: error.response?.status,
+      status: error.upstreamStatus || error.response?.status,
       message: error.message,
     });
-    return res.status(502).send('Upstream error fetching stream');
+    return res.status(status).send(
+      status === 503
+        ? 'Stream expired, re-resolving'
+        : 'Upstream error fetching stream'
+    );
   }
 }
 
