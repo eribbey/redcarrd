@@ -73,15 +73,18 @@ This document provides comprehensive guidance for AI assistants working on the R
 - REST API endpoints (`/api/*`)
 - Static file serving for UI
 - M3U8 playlist (`/playlist.m3u8`) and EPG (`/epg.xml`)
-- Rebuild scheduling and orchestration
+- Event refresh scheduling, resolution and health check loop startup, graceful shutdown
 - 2-way stream routing: HLS proxy or transmux
 
 **`channelManager.js`** - Channel Lifecycle
 - Builds channels from scraped events
 - Reconciles channel changes (add/update/remove)
-- Generates M3U8 playlists and XMLTV EPG
+- Generates M3U8 playlists and XMLTV EPG (only healthy channels included)
 - Proxies and rewrites HLS manifests
-- Uses StreamResolver for stream URL detection (no persistent browser instances)
+- Three-loop architecture:
+  - Resolution loop (`runResolutionLoop()`, `getNextChannelForResolution()`, `resolveAndUpdateStatus()`) - picks pending/failed channels and resolves stream URLs via StreamResolver
+  - Health check loop (`runHealthCheckLoop()`, `checkChannelHealth()`) - validates resolved streams, promotes to healthy or demotes to pending/dead
+  - Event refresh loop (driven by server.js) - scrapes API for new events
 - Coordinates transmuxing jobs with `FFMPEG_MAX_CONCURRENT` concurrency limit
 - Expires stale channels based on event time + lifetime
 
@@ -206,7 +209,14 @@ STREAM_URL_TTL_MINUTES=30              # TTL for resolved stream URLs (default 3
 FFMPEG_MAX_CONCURRENT=3                # Max concurrent FFmpeg transmux processes (default 3)
 STREAM_DETECT_TIMEOUT_MS=20000         # Timeout for stream URL detection (default 20000)
 BROWSER_IDLE_TIMEOUT_MINUTES=60        # Browser idle timeout before cleanup (default 60)
-HYDRATION_CONCURRENCY=5                # Parallel hydration jobs
+
+# Lifecycle Loop Configuration
+EVENT_POLL_INTERVAL_MINUTES=10            # How often to scrape API for live events
+HEALTH_CHECK_INTERVAL_SECONDS=30          # How often to validate resolved stream URLs
+RESOLUTION_LOOP_SLEEP_MS=2000             # Sleep between resolution attempts
+RESOLUTION_MAX_FAILURES=5                 # Consecutive failures before marking dead
+HEALTH_RAPID_FAIL_THRESHOLD=3             # Rapid healthy->unhealthy cycles before dead
+HEALTH_RAPID_FAIL_WINDOW_MS=600000        # Window (10 min) for rapid fail detection
 
 # Solver Configuration (Cloudflare bypass)
 SOLVER_ENDPOINT_URL=http://solver:8191/v1  # Flaresolverr/Byparr endpoint
@@ -511,18 +521,21 @@ eventSource.onmessage = (event) => {
 };
 ```
 
-### Pattern: Stream Resolution (Short-Lived Browser)
+### Pattern: Stream Resolution (Resolution Loop)
 
-Stream URLs are detected via short-lived Playwright sessions that close after detection:
+Stream URLs are resolved via a continuous resolution loop that picks the next channel needing resolution:
 
 ```javascript
-// 1. Launch short-lived browser session
-// 2. Monitor network traffic for HLS/DASH/MP4 URLs
-// 3. Optionally inspect player config as fallback
-// 4. Close browser context immediately after URL found
-// 5. Return resolved URL for proxying or transmuxing
-const streamUrl = await streamResolver.resolve(embedUrl);
-// Browser is already closed at this point
+// Resolution loop (runs continuously):
+// 1. getNextChannelForResolution() picks next pending/failed/expiring channel
+// 2. resolveAndUpdateStatus() launches short-lived Playwright session
+// 3. On success: status -> resolved, stream URL stored
+// 4. On failure: status -> failed with backoff, or dead after max failures
+// 5. Health check loop validates resolved streams -> healthy
+// 6. Only healthy channels appear in playlist
+const channel = manager.getNextChannelForResolution();
+await manager.resolveAndUpdateStatus(channel);
+// Channel is now 'resolved', awaiting health check promotion to 'healthy'
 ```
 
 ### Pattern: Graceful Degradation
@@ -573,15 +586,11 @@ function rewriteManifest(manifest, channelId, baseUrl) {
 
 ### Pattern: Concurrent with Limits
 
-Hydrate multiple channels concurrently with configurable limit:
+Resolution and health checks run sequentially via loops with configurable sleep intervals, while FFmpeg transmuxing uses a concurrency limit:
 
 ```javascript
-const concurrency = parseInt(process.env.HYDRATION_CONCURRENCY) || 5;
-
-for (let i = 0; i < channels.length; i += concurrency) {
-  const batch = channels.slice(i, i + concurrency);
-  await Promise.allSettled(batch.map(ch => hydrateChannel(ch)));
-}
+const maxConcurrent = parseInt(process.env.FFMPEG_MAX_CONCURRENT) || 3;
+// Transmux jobs are gated by concurrency limit
 ```
 
 ### Anti-Pattern: Avoid Hardcoding Timeouts
@@ -646,7 +655,7 @@ try {
 - **Symptom**: Server unresponsive or slow
 - **Cause**: Too many concurrent FFmpeg processes or browser contexts
 - **Solution**:
-  - Reduce `HYDRATION_CONCURRENCY` or `FFMPEG_MAX_CONCURRENT`
+  - Reduce `FFMPEG_MAX_CONCURRENT`
   - Increase rebuild interval
   - Monitor with `docker stats` or `htop`
   - Ensure FFmpeg processes are properly cleaned up
@@ -690,9 +699,10 @@ try {
 
 ### Critical Paths
 
-- **Channel Build**: `server.js` → `scraper.js` → `embedResolver.js` → `channelManager.js`
-- **Stream Resolution**: `channelManager.js` → `streamResolver.js` (short-lived Playwright session)
-- **Playlist Serving**: `server.js` → `channelManager.js` → client
+- **Channel Build**: `server.js` (event refresh) → `scraper.js` → `embedResolver.js` → `channelManager.js` (build only, no hydration)
+- **Stream Resolution**: `channelManager.js` (resolution loop) → `streamResolver.js` (short-lived Playwright session)
+- **Health Checks**: `channelManager.js` (health check loop) → upstream stream URLs
+- **Playlist Serving**: `server.js` → `channelManager.js` (healthy filter) → client
 - **Stream Serving**: `server.js` → `channelManager.js` → HLS proxy or transmux
 
 ---
@@ -739,7 +749,7 @@ try {
 
 ## Version Information
 
-**Last Updated**: 2026-03-22
+**Last Updated**: 2026-03-24
 **Node.js Version**: 20+ recommended
 **Playwright Version**: 1.57.0
 **Express Version**: 5.1.0
