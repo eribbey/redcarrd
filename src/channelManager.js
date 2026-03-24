@@ -129,6 +129,10 @@ class ChannelManager {
       event.requestHeaders ||
       (embedUrlChanged ? buildDefaultStreamHeaders(event.embedUrl) : existing?.requestHeaders || buildDefaultStreamHeaders(event.embedUrl));
 
+    // Reset dead channels to pending on event refresh
+    const preserveStatus = existing?.status && existing.status !== 'dead';
+    const status = embedUrlChanged ? 'pending' : (preserveStatus ? existing.status : 'pending');
+
     return {
       id,
       category: event.category || 'uncategorized',
@@ -144,7 +148,16 @@ class ChannelManager {
         ? { source: event.sourceOptions[0].source, sourceId: event.sourceOptions[0].sourceId }
         : existing?.selectedSource || null,
       streamMode: existing?.streamMode || null,
+      streamHeaders: embedUrlChanged ? null : existing?.streamHeaders || null,
       expiresAt,
+      // Lifecycle fields
+      status,
+      resolvedAt: embedUrlChanged ? null : existing?.resolvedAt || null,
+      lastHealthCheck: embedUrlChanged ? null : existing?.lastHealthCheck || null,
+      failCount: (embedUrlChanged || !preserveStatus) ? 0 : existing?.failCount || 0,
+      nextRetryAt: (embedUrlChanged || !preserveStatus) ? null : existing?.nextRetryAt || null,
+      healthFailCount: embedUrlChanged ? 0 : existing?.healthFailCount || 0,
+      healthFailTimestamps: embedUrlChanged ? [] : existing?.healthFailTimestamps || [],
     };
   }
 
@@ -360,9 +373,16 @@ class ChannelManager {
         channelId: channel.id,
         status: response.status,
       });
+      // Clear the dead stream URL so the channel shows as unavailable
+      // until re-resolution completes, preventing a retry storm
+      channel.streamUrl = null;
+      channel.resolvedAt = null;
       this.resolveStream(channel).catch(err =>
         this.logger.warn('Re-resolution after rejection failed', { channelId: channel.id, error: err.message })
       );
+      const err = new Error(`Upstream returned ${response.status}`);
+      err.upstreamStatus = response.status;
+      throw err;
     }
 
     return response;

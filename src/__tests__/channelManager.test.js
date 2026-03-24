@@ -251,6 +251,52 @@ describe('ChannelManager', () => {
     });
   });
 
+  test('creates channels with pending status and lifecycle fields', async () => {
+    const manager = new ChannelManager({ lifetimeHours: 24, logger });
+    const events = [
+      {
+        title: 'Game A',
+        startTime: '2024-01-01T12:00:00Z',
+        category: 'football',
+        embedUrl: 'https://example.com/embed/a',
+        sourceOptions: [],
+        qualityOptions: [],
+      },
+    ];
+
+    await manager.buildChannels(events, ['football']);
+    const channel = manager.channels[0];
+
+    expect(channel.status).toBe('pending');
+    expect(channel.failCount).toBe(0);
+    expect(channel.nextRetryAt).toBeNull();
+    expect(channel.lastHealthCheck).toBeNull();
+    expect(channel.healthFailCount).toBe(0);
+  });
+
+  test('resets dead channels to pending on event refresh', async () => {
+    const manager = new ChannelManager({ lifetimeHours: 24, logger });
+    const events = [
+      {
+        title: 'Game A',
+        startTime: '2024-01-01T12:00:00Z',
+        category: 'football',
+        embedUrl: 'https://example.com/embed/a',
+        sourceOptions: [],
+        qualityOptions: [],
+      },
+    ];
+
+    await manager.buildChannels(events, ['football']);
+    manager.channels[0].status = 'dead';
+    manager.channels[0].failCount = 5;
+
+    // Rebuild with same events — dead should reset
+    await manager.buildChannels(events, ['football']);
+    expect(manager.channels[0].status).toBe('pending');
+    expect(manager.channels[0].failCount).toBe(0);
+  });
+
   test('retains upstream cookies across proxied HLS requests', async () => {
     const manager = new ChannelManager({ lifetimeHours: 24, logger });
     const channel = {
