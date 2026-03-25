@@ -306,8 +306,16 @@ class StreamResolver {
         timeout: Math.min(timeout * 2, 90000),
       });
 
+      // Check if page has embed iframes — if so, we need more detection time
+      const hasEmbedIframes = await page.evaluate(() => {
+        return Array.from(document.querySelectorAll('iframe'))
+          .some((f) => f.src && !f.src.includes('ad.') && !f.src.includes('ads.') && !f.src.includes('google'));
+      }).catch(() => false);
+
+      const effectiveTimeout = hasEmbedIframes ? timeout + 15000 : timeout;
+
       // Start network detection BEFORE waiting for iframes — captures all traffic
-      const streamUrlPromise = this._waitForStreamUrl(page, timeout, {
+      const streamUrlPromise = this._waitForStreamUrl(page, effectiveTimeout, {
         enableConfigFallback: this.enableConfigFallback,
       });
 
@@ -365,6 +373,7 @@ class StreamResolver {
       let lastConfigError = null;
       let mp4Candidate = null;
       let mp4GraceTimer = null;
+      const mediaRequests = []; // diagnostic: track media-related requests
 
       const finish = (err, info) => {
         if (done) return;
@@ -373,6 +382,10 @@ class StreamResolver {
         page.removeListener('response', onResponse);
         clearTimeout(timer);
         if (mp4GraceTimer) clearTimeout(mp4GraceTimer);
+        // Log what we saw during detection
+        if (err && mediaRequests.length) {
+          this.logger.debug('Media requests seen during detection', { requests: mediaRequests.slice(0, 20) });
+        }
         if (err) return reject(err);
         resolve(info);
       };
@@ -416,6 +429,12 @@ class StreamResolver {
           const url = request.url();
           if (isAdUrl(url)) return;
 
+          const resourceType = request.resourceType();
+          // Track media/XHR/fetch requests for diagnostics
+          if (['media', 'xhr', 'fetch', 'other'].includes(resourceType)) {
+            mediaRequests.push({ url: url.substring(0, 200), type: resourceType });
+          }
+
           if (/\.m3u8(\?|$)/i.test(url)) {
             finish(null, { type: 'hls', url });
           } else if (/\.mpd(\?|$)/i.test(url)) {
@@ -434,17 +453,37 @@ class StreamResolver {
         } catch (_) {}
       };
 
-      // Detect HLS/DASH via response content-type for extensionless URLs
+      // Detect HLS/DASH via response content-type (for extensionless URLs) or response body
       const onResponse = (response) => {
         try {
           const url = response.url();
           if (isAdUrl(url)) return;
 
           const contentType = (response.headers()['content-type'] || '').toLowerCase();
-          if (/mpegurl/i.test(contentType) && !/\.m3u8(\?|$)/i.test(url)) {
+
+          // Detect via content-type
+          if (/mpegurl/i.test(contentType)) {
             finish(null, { type: 'hls', url });
-          } else if (/dash\+xml/i.test(contentType) && !/\.mpd(\?|$)/i.test(url)) {
+            return;
+          }
+          if (/dash\+xml/i.test(contentType)) {
             finish(null, { type: 'dash', url });
+            return;
+          }
+
+          // Detect via URL patterns that don't use file extensions
+          // Many streaming servers use paths like /hls/channel or /live/stream
+          if (/\/(hls|live|stream|playlist)\//i.test(url) && !isAdUrl(url)) {
+            const status = response.status();
+            if (status >= 200 && status < 300) {
+              // Try to read the body to check if it's an HLS manifest
+              response.text().then((body) => {
+                if (body && body.includes('#EXTM3U')) {
+                  this.logger.info('HLS detected via response body inspection', { url: url.substring(0, 200) });
+                  finish(null, { type: 'hls', url });
+                }
+              }).catch(() => {});
+            }
           }
         } catch (_) {}
       };

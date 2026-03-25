@@ -1,12 +1,17 @@
 'use strict';
 
 // Mock Playwright before requiring the module under test
+// Event handler store for mockPage.on — allows multiple event types to coexist
+const _pageHandlers = {};
 const mockPage = {
   goto: jest.fn().mockResolvedValue(null),
-  on: jest.fn(),
+  on: jest.fn().mockImplementation((event, handler) => {
+    if (!_pageHandlers[event]) _pageHandlers[event] = [];
+    _pageHandlers[event].push(handler);
+  }),
   removeListener: jest.fn(),
   $: jest.fn().mockResolvedValue(null),
-  evaluate: jest.fn().mockResolvedValue([]),
+  evaluate: jest.fn().mockResolvedValue(false),
   waitForTimeout: jest.fn().mockResolvedValue(null),
   waitForFunction: jest.fn().mockResolvedValue(null),
   frames: jest.fn().mockReturnValue([{
@@ -53,13 +58,21 @@ function createLogger() {
  * When page.on('request', handler) is called, we capture the handler,
  * then invoke it with a mock request object.
  */
-function simulateRequest(url) {
-  const requestHandlers = mockPage.on.mock.calls
-    .filter(([event]) => event === 'request')
-    .map(([, handler]) => handler);
+function simulateRequest(url, resourceType = 'xhr') {
+  const handlers = _pageHandlers['request'] || [];
+  const mockRequest = { url: () => url, resourceType: () => resourceType };
+  handlers.forEach((handler) => handler(mockRequest));
+}
 
-  const mockRequest = { url: () => url };
-  requestHandlers.forEach((handler) => handler(mockRequest));
+function simulateResponse(url, contentType = 'text/html', status = 200) {
+  const handlers = _pageHandlers['response'] || [];
+  const mockResponse = {
+    url: () => url,
+    headers: () => ({ 'content-type': contentType }),
+    status: () => status,
+    text: () => Promise.resolve(''),
+  };
+  handlers.forEach((handler) => handler(mockResponse));
 }
 
 describe('StreamResolver', () => {
@@ -69,6 +82,13 @@ describe('StreamResolver', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     jest.useFakeTimers();
+    // Clear event handler store
+    for (const key of Object.keys(_pageHandlers)) delete _pageHandlers[key];
+    // Re-apply default on implementation after clearAllMocks
+    mockPage.on.mockImplementation((event, handler) => {
+      if (!_pageHandlers[event]) _pageHandlers[event] = [];
+      _pageHandlers[event].push(handler);
+    });
     logger = createLogger();
     resolver = new StreamResolver({ logger });
     // Reset env overrides
@@ -111,17 +131,11 @@ describe('StreamResolver', () => {
 
   describe('resolve()', () => {
     test('should detect HLS manifest URL from network traffic', async () => {
-      // Make page.on capture the request handler, then simulate a request
-      mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
-          // Schedule the mock request emission after setup
-          setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/live/stream.m3u8' });
-          }, 100);
-        }
-      });
-
       jest.useRealTimers();
+
+      // Schedule request simulation after handlers are registered
+      setTimeout(() => simulateRequest('https://cdn.example.com/live/stream.m3u8'), 200);
+
       const result = await resolver.resolve('https://embed.example.com/player', {
         timeout: 5000,
         maxAttempts: 1,
@@ -135,15 +149,10 @@ describe('StreamResolver', () => {
     });
 
     test('should detect DASH manifest URL from network traffic', async () => {
-      mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
-          setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/live/manifest.mpd' });
-          }, 100);
-        }
-      });
-
       jest.useRealTimers();
+
+      setTimeout(() => simulateRequest('https://cdn.example.com/live/manifest.mpd'), 200);
+
       const result = await resolver.resolve('https://embed.example.com/player', {
         timeout: 5000,
         maxAttempts: 1,
@@ -155,18 +164,13 @@ describe('StreamResolver', () => {
     });
 
     test('should filter out ad/tracking URLs and detect real stream', async () => {
-      mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
-          setTimeout(() => {
-            // First: ad URL that should be filtered
-            handler({ url: () => 'https://ad.doubleclick.net/video.m3u8' });
-            // Second: real stream URL
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
-          }, 100);
-        }
-      });
-
       jest.useRealTimers();
+
+      setTimeout(() => {
+        simulateRequest('https://ad.doubleclick.net/video.m3u8');
+        simulateRequest('https://cdn.example.com/stream.m3u8');
+      }, 200);
+
       const result = await resolver.resolve('https://embed.example.com/player', {
         timeout: 5000,
         maxAttempts: 1,
@@ -174,13 +178,11 @@ describe('StreamResolver', () => {
 
       expect(result).not.toBeNull();
       expect(result.url).toBe('https://cdn.example.com/stream.m3u8');
-      // The ad URL should have been skipped
       expect(result.url).not.toContain('doubleclick');
     });
 
     test('should return null when no stream URL detected (timeout)', async () => {
-      // Don't emit any request events - let it time out
-      mockPage.on.mockImplementation(() => {});
+      // No network requests emitted — handlers registered but nothing fires
 
       jest.useRealTimers();
 
@@ -199,19 +201,13 @@ describe('StreamResolver', () => {
     });
 
     test('should apply solver cookies when provided', async () => {
-      mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
-          setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
-          }, 100);
-        }
-      });
+      jest.useRealTimers();
+      setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
 
       const solverCookies = [
         { name: 'cf_clearance', value: 'abc123', domain: '.example.com', path: '/' },
       ];
 
-      jest.useRealTimers();
       await resolver.resolve('https://embed.example.com/player', {
         timeout: 5000,
         maxAttempts: 1,
@@ -222,21 +218,18 @@ describe('StreamResolver', () => {
     });
 
     test('should retry with different user agents on failure', async () => {
-      let attemptCount = 0;
-      mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
-          attemptCount++;
-          if (attemptCount >= 2) {
-            // Succeed on second attempt
-            setTimeout(() => {
-              handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
-            }, 100);
-          }
-          // First attempt: no requests emitted (will time out)
-        }
-      });
-
       jest.useRealTimers();
+      let resolveCallCount = 0;
+      const origResolve = resolver._resolveWithContext.bind(resolver);
+      resolver._resolveWithContext = async (...args) => {
+        resolveCallCount++;
+        if (resolveCallCount >= 2) {
+          // On second attempt, schedule a request
+          setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
+        }
+        return origResolve(...args);
+      };
+
       resolver.enableConfigFallback = false;
       const result = await resolver.resolve('https://embed.example.com/player', {
         timeout: 500,
@@ -245,7 +238,6 @@ describe('StreamResolver', () => {
 
       expect(result).not.toBeNull();
       expect(result.type).toBe('hls');
-      // Verify multiple contexts were created (different user agents)
       expect(mockBrowser.newContext.mock.calls.length).toBeGreaterThanOrEqual(2);
       const ua1 = mockBrowser.newContext.mock.calls[0][0].userAgent;
       const ua2 = mockBrowser.newContext.mock.calls[1][0].userAgent;
@@ -253,20 +245,14 @@ describe('StreamResolver', () => {
     });
 
     test('should include cookies in returned headers', async () => {
-      mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
-          setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
-          }, 100);
-        }
-      });
+      jest.useRealTimers();
+      setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
 
       mockContext.cookies.mockResolvedValue([
         { name: 'session', value: 'xyz' },
         { name: 'token', value: '123' },
       ]);
 
-      jest.useRealTimers();
       const result = await resolver.resolve('https://embed.example.com/player', {
         timeout: 5000,
         maxAttempts: 1,
@@ -276,15 +262,9 @@ describe('StreamResolver', () => {
     });
 
     test('should inject anti-detection init scripts', async () => {
-      mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
-          setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
-          }, 100);
-        }
-      });
-
       jest.useRealTimers();
+      setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
+
       await resolver.resolve('https://embed.example.com/player', {
         timeout: 5000,
         maxAttempts: 1,
@@ -294,15 +274,9 @@ describe('StreamResolver', () => {
     });
 
     test('should not set Referer/Origin in extraHTTPHeaders (let browser handle naturally)', async () => {
-      mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
-          setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
-          }, 100);
-        }
-      });
-
       jest.useRealTimers();
+      setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
+
       await resolver.resolve('https://embed.example.com/player?id=123', {
         timeout: 5000,
         maxAttempts: 1,
@@ -327,15 +301,9 @@ describe('StreamResolver', () => {
     });
 
     test('should detect MP4 from network traffic after grace period', async () => {
-      mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
-          setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/video.mp4' });
-          }, 100);
-        }
-      });
-
       jest.useRealTimers();
+      setTimeout(() => simulateRequest('https://cdn.example.com/video.mp4'), 200);
+
       const result = await resolver.resolve('https://embed.example.com/player', {
         timeout: 15000,
         maxAttempts: 1,
@@ -351,19 +319,19 @@ describe('StreamResolver', () => {
     test('should reuse browser across resolve calls', async () => {
       const { chromium } = require('playwright');
 
-      mockPage.on.mockImplementation((event, handler) => {
-        if (event === 'request') {
-          setTimeout(() => {
-            handler({ url: () => 'https://cdn.example.com/stream.m3u8' });
-          }, 50);
-        }
-      });
-
       jest.useRealTimers();
+
+      // Schedule requests for both resolve calls
+      const scheduleRequest = () => {
+        setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
+      };
+
+      scheduleRequest();
       await resolver.resolve('https://embed1.example.com/player', {
         timeout: 2000,
         maxAttempts: 1,
       });
+      scheduleRequest();
       await resolver.resolve('https://embed2.example.com/player', {
         timeout: 2000,
         maxAttempts: 1,
@@ -385,14 +353,16 @@ describe('StreamResolver', () => {
 
   describe('config fallback', () => {
     test('should fall back to player config when network detection times out', async () => {
-      // No network requests emitted
-      mockPage.on.mockImplementation(() => {});
+      // No network requests emitted — handlers registered normally but nothing fires
 
-      // Player config returns a stream
-      mockPage.evaluate.mockResolvedValue({
-        url: 'https://cdn.example.com/fallback.m3u8',
-        type: 'hls',
-      });
+      // Player config returns a stream (evaluate is called for iframe check first, then config fallback)
+      mockPage.evaluate
+        .mockResolvedValueOnce(false) // hasEmbedIframes check
+        .mockResolvedValueOnce([]) // iframe srcs in _waitForIframesAndAutoplay
+        .mockResolvedValue({ // config fallback
+          url: 'https://cdn.example.com/fallback.m3u8',
+          type: 'hls',
+        });
 
       jest.useRealTimers();
       resolver.enableConfigFallback = true;
