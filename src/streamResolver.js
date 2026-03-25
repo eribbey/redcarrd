@@ -40,6 +40,21 @@ const AD_URL_PATTERNS = [
   /prebid/i,
 ];
 
+/**
+ * URL patterns for known non-stream MP4 content (promo videos, venue content, etc.)
+ * that should be ignored during stream detection.
+ */
+const NON_STREAM_MP4_PATTERNS = [
+  /cosm-cdn\.io/i,
+  /promo/i,
+  /trailer/i,
+  /preview/i,
+  /placeholder/i,
+  /venue[_-]?events/i,
+  /category[_-]?video/i,
+  /assets.*\.mp4/i,
+];
+
 function parseBooleanEnv(value, defaultValue = false) {
   if (value === undefined) return defaultValue;
   const normalized = String(value).trim().toLowerCase();
@@ -58,6 +73,16 @@ function randomDesktopViewport() {
 function isAdUrl(url) {
   return AD_URL_PATTERNS.some((pattern) => pattern.test(url));
 }
+
+function isNonStreamMp4(url) {
+  return NON_STREAM_MP4_PATTERNS.some((pattern) => pattern.test(url));
+}
+
+/**
+ * Grace period (ms) to wait for HLS/DASH after first MP4 detection before
+ * accepting the MP4 as the stream URL.
+ */
+const MP4_GRACE_PERIOD_MS = parseInt(process.env.MP4_GRACE_PERIOD_MS, 10) || 5000;
 
 /**
  * Anti-detection init script injected into every browser context.
@@ -281,12 +306,13 @@ class StreamResolver {
         timeout: Math.min(timeout * 2, 90000),
       });
 
-      // Start network detection and autoplay in parallel
+      // Start network detection BEFORE waiting for iframes — captures all traffic
       const streamUrlPromise = this._waitForStreamUrl(page, timeout, {
         enableConfigFallback: this.enableConfigFallback,
       });
 
-      await this._autoplayVideo(page);
+      // Wait for iframes to load and try to interact with them
+      await this._waitForIframesAndAutoplay(page, timeout);
 
       const streamInfo = await streamUrlPromise;
 
@@ -337,17 +363,34 @@ class StreamResolver {
     return new Promise((resolve, reject) => {
       let done = false;
       let lastConfigError = null;
+      let mp4Candidate = null;
+      let mp4GraceTimer = null;
 
       const finish = (err, info) => {
         if (done) return;
         done = true;
         page.removeListener('request', onRequest);
+        page.removeListener('response', onResponse);
         clearTimeout(timer);
+        if (mp4GraceTimer) clearTimeout(mp4GraceTimer);
         if (err) return reject(err);
         resolve(info);
       };
 
+      const acceptMp4Candidate = () => {
+        if (mp4Candidate && !done) {
+          this.logger.info('Accepting MP4 candidate after grace period', { url: mp4Candidate.url });
+          finish(null, mp4Candidate);
+        }
+      };
+
       const timer = setTimeout(async () => {
+        if (mp4Candidate) {
+          this.logger.info('Timeout reached with MP4 candidate available, accepting it');
+          finish(null, mp4Candidate);
+          return;
+        }
+
         if (enableConfigFallback) {
           try {
             this.logger.warn('Network sniff timed out; attempting config fallback');
@@ -368,11 +411,9 @@ class StreamResolver {
         finish(new Error(timeoutMessage));
       }, timeoutMs);
 
-      function onRequest(request) {
+      const onRequest = (request) => {
         try {
           const url = request.url();
-
-          // Filter out ad/tracking URLs
           if (isAdUrl(url)) return;
 
           if (/\.m3u8(\?|$)/i.test(url)) {
@@ -380,12 +421,36 @@ class StreamResolver {
           } else if (/\.mpd(\?|$)/i.test(url)) {
             finish(null, { type: 'dash', url });
           } else if (/\.(mp4)(\?|$)/i.test(url)) {
-            finish(null, { type: 'mp4', url });
+            if (isNonStreamMp4(url)) {
+              this.logger.debug('Ignoring non-stream MP4', { url });
+              return;
+            }
+            if (!mp4Candidate) {
+              mp4Candidate = { type: 'mp4', url };
+              this.logger.debug('MP4 candidate detected, waiting for HLS/DASH', { url });
+              mp4GraceTimer = setTimeout(acceptMp4Candidate, MP4_GRACE_PERIOD_MS);
+            }
           }
         } catch (_) {}
-      }
+      };
+
+      // Detect HLS/DASH via response content-type for extensionless URLs
+      const onResponse = (response) => {
+        try {
+          const url = response.url();
+          if (isAdUrl(url)) return;
+
+          const contentType = (response.headers()['content-type'] || '').toLowerCase();
+          if (/mpegurl/i.test(contentType) && !/\.m3u8(\?|$)/i.test(url)) {
+            finish(null, { type: 'hls', url });
+          } else if (/dash\+xml/i.test(contentType) && !/\.mpd(\?|$)/i.test(url)) {
+            finish(null, { type: 'dash', url });
+          }
+        } catch (_) {}
+      };
 
       page.on('request', onRequest);
+      page.on('response', onResponse);
     });
   }
 
@@ -418,6 +483,39 @@ class StreamResolver {
       }
 
       const candidates = [];
+
+      // HLS.js instance inspection
+      if (typeof window.Hls !== 'undefined') {
+        try {
+          // Check for attached HLS.js instances on video elements
+          document.querySelectorAll('video').forEach((vid) => {
+            // HLS.js stores reference on the media element or global
+            if (vid._hlsPlayer?.url) {
+              candidates.push({ url: vid._hlsPlayer.url, type: 'hls' });
+            }
+          });
+          // Check global Hls instances — some players store them on window
+          for (const key of Object.keys(window)) {
+            try {
+              const obj = window[key];
+              if (obj && obj.constructor?.name === 'Hls' && typeof obj.url === 'string' && obj.url) {
+                candidates.push({ url: obj.url, type: 'hls' });
+              }
+            } catch (_) {}
+          }
+        } catch (_) {}
+      }
+
+      // Clappr player inspection
+      if (typeof window.player !== 'undefined') {
+        try {
+          const src = window.player?.options?.source || window.player?.options?.src;
+          if (src) {
+            const candidate = normalizeCandidate(src);
+            if (candidate) candidates.push(candidate);
+          }
+        } catch (_) {}
+      }
 
       // JWPlayer playlist inspection
       if (typeof window.jwplayer === 'function') {
@@ -456,52 +554,62 @@ class StreamResolver {
   }
 
   /**
-   * Try to autoplay the video in the page by clicking play buttons
-   * and calling play() on video elements.
+   * Wait for iframes to load, then try to autoplay video in all frames.
+   * The actual player often lives inside a nested iframe (e.g., pooembed.eu).
    */
-  async _autoplayVideo(page) {
-    // Give page scripts a moment to set up the player
+  async _waitForIframesAndAutoplay(page, timeout) {
+    // Give page scripts a moment to set up iframes
     await page.waitForTimeout(2000);
 
-    await page.evaluate(() => {
-      function tryPlay() {
-        try {
-          // HTML5 <video>
-          const vid = document.querySelector('video');
-          if (vid) {
-            vid.muted = true;
-            const p = vid.play();
-            if (p && p.catch) p.catch(() => {});
-          }
+    // Find embed iframes (skip ad iframes)
+    const iframeSrcs = await page.evaluate(() => {
+      return Array.from(document.querySelectorAll('iframe'))
+        .map((f) => f.src || '')
+        .filter((src) => src && !src.includes('ad.') && !src.includes('ads.') && !src.includes('google'));
+    });
 
-          // JWPlayer global API
-          if (typeof window.jwplayer === 'function') {
-            try {
-              let player;
-              try {
-                player = window.jwplayer();
-              } catch (_) {
-                const jwElem =
-                  document.querySelector('.jwplayer, [id^="jwplayer"], [id^="vplayer"]');
-                if (jwElem) {
-                  player = window.jwplayer(jwElem);
+    // Wait for embed iframes to actually load
+    if (iframeSrcs.length) {
+      this.logger.debug('Waiting for embed iframes to load', { iframeSrcs });
+
+      for (const src of iframeSrcs) {
+        try {
+          // Wait for frame to appear in page.frames() with a matching URL
+          const frameLoadTimeout = Math.min(timeout / 2, 10000);
+          await page.waitForFunction(
+            (targetSrc) => {
+              const iframes = document.querySelectorAll('iframe');
+              for (const iframe of iframes) {
+                if (iframe.src === targetSrc && iframe.contentWindow) {
+                  return true;
                 }
               }
-              if (player) {
-                player.setMute(true);
-                player.play();
-              }
-            } catch (_) {}
-          }
+              return false;
+            },
+            src,
+            { timeout: frameLoadTimeout },
+          ).catch(() => {});
+
+          // Give frame content time to initialize player
+          await page.waitForTimeout(3000);
         } catch (_) {}
       }
 
-      tryPlay();
-      document.body.addEventListener('click', tryPlay, { once: true });
-      document.body.addEventListener('keydown', tryPlay, { once: true });
-    });
+      // Log frame state after waiting
+      const frames = page.frames();
+      const loadedFrames = frames.map((f) => ({ url: f.url(), name: f.name() })).filter((f) => f.url);
+      this.logger.debug('Frames after wait', { count: frames.length, loaded: loadedFrames });
+    }
 
-    // Click common play button selectors
+    // Try autoplay in ALL frames (main page + iframes)
+    const allFrames = page.frames();
+    for (const frame of allFrames) {
+      try {
+        await this._autoplayInFrame(frame);
+      } catch (_) {}
+    }
+
+    // Click common play button selectors in main page
     const playSelectors = [
       '.play-button',
       '.vjs-big-play-button',
@@ -519,7 +627,44 @@ class StreamResolver {
       } catch (_) {}
     }
 
+    // Final wait for any triggered stream loads
     await page.waitForTimeout(3000);
+  }
+
+  /**
+   * Try to autoplay video within a single frame.
+   */
+  async _autoplayInFrame(frame) {
+    await frame.evaluate(() => {
+      try {
+        // HTML5 <video>
+        const vid = document.querySelector('video');
+        if (vid) {
+          vid.muted = true;
+          const p = vid.play();
+          if (p && p.catch) p.catch(() => {});
+        }
+
+        // JWPlayer
+        if (typeof window.jwplayer === 'function') {
+          try {
+            const player = window.jwplayer();
+            if (player) {
+              player.setMute(true);
+              player.play();
+            }
+          } catch (_) {}
+        }
+
+        // Click play buttons within this frame
+        const playBtns = document.querySelectorAll(
+          '.play-button, .vjs-big-play-button, [aria-label="Play"], button.play, .jw-icon-display'
+        );
+        playBtns.forEach((btn) => {
+          try { btn.click(); } catch (_) {}
+        });
+      } catch (_) {}
+    }).catch(() => {});
   }
 }
 
@@ -527,8 +672,11 @@ module.exports = {
   StreamResolver,
   // Exported for testing
   isAdUrl,
+  isNonStreamMp4,
   AD_URL_PATTERNS,
+  NON_STREAM_MP4_PATTERNS,
   DEFAULT_USER_AGENTS,
   PLAYWRIGHT_LAUNCH_ARGS,
   ANTI_DETECTION_SCRIPT,
+  MP4_GRACE_PERIOD_MS,
 };

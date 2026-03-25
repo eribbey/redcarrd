@@ -6,8 +6,14 @@ const mockPage = {
   on: jest.fn(),
   removeListener: jest.fn(),
   $: jest.fn().mockResolvedValue(null),
-  evaluate: jest.fn().mockResolvedValue(null),
+  evaluate: jest.fn().mockResolvedValue([]),
   waitForTimeout: jest.fn().mockResolvedValue(null),
+  waitForFunction: jest.fn().mockResolvedValue(null),
+  frames: jest.fn().mockReturnValue([{
+    url: () => 'about:blank',
+    name: () => '',
+    evaluate: jest.fn().mockResolvedValue(null),
+  }]),
 };
 
 const mockContext = {
@@ -320,7 +326,7 @@ describe('StreamResolver', () => {
       expect(mockContext.close).toHaveBeenCalled();
     });
 
-    test('should detect MP4 from network traffic', async () => {
+    test('should detect MP4 from network traffic after grace period', async () => {
       mockPage.on.mockImplementation((event, handler) => {
         if (event === 'request') {
           setTimeout(() => {
@@ -331,14 +337,14 @@ describe('StreamResolver', () => {
 
       jest.useRealTimers();
       const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 5000,
+        timeout: 15000,
         maxAttempts: 1,
       });
 
       expect(result).not.toBeNull();
       expect(result.type).toBe('mp4');
       expect(result.url).toBe('https://cdn.example.com/video.mp4');
-    });
+    }, 20000);
   });
 
   describe('browser management', () => {
