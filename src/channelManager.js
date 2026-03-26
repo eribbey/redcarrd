@@ -245,6 +245,7 @@ class ChannelManager {
   }
 
   buildStreamHeaders(channel) {
+    // streamHeaders from resolver take priority (they have the correct Referer/Origin from detection)
     const headers = { ...buildDefaultStreamHeaders(channel?.embedUrl), ...(channel?.requestHeaders || {}), ...(channel?.streamHeaders || {}) };
 
     if (!headers.Referer && channel?.embedUrl) headers.Referer = channel.embedUrl;
@@ -406,7 +407,7 @@ class ChannelManager {
 
       const result = await this.streamResolver.resolve(embedUrl, {
         referer: channel.referer || process.env.FRONT_PAGE_URL || 'https://streamed.pk',
-        maxAttempts: parseInt(process.env.RESTREAM_MAX_ATTEMPTS) || 4,
+        maxAttempts: parseInt(process.env.RESTREAM_MAX_ATTEMPTS) || 2,
         solverCookies,
       });
 
@@ -601,11 +602,22 @@ class ChannelManager {
       if (healthy) {
         channel.status = 'healthy';
         channel.lastHealthCheck = Date.now();
-        this.logger.debug('Health check passed', { channelId: channel.id });
+        this.logger.info('Health check passed', { channelId: channel.id, streamUrl: channel.streamUrl?.substring(0, 100) });
       } else {
+        this.logger.warn('Health check failed', {
+          channelId: channel.id,
+          streamUrl: channel.streamUrl?.substring(0, 100),
+          reason,
+          referer: headers.Referer?.substring(0, 100),
+        });
         this._markUnhealthy(channel, reason || 'non-2xx or invalid manifest', rapidFailThreshold, rapidFailWindowMs);
       }
     } catch (error) {
+      this.logger.warn('Health check error', {
+        channelId: channel.id,
+        streamUrl: channel.streamUrl?.substring(0, 100),
+        error: error.message,
+      });
       this._markUnhealthy(channel, error.message, rapidFailThreshold, rapidFailWindowMs);
     }
   }

@@ -12,6 +12,7 @@ const mockPage = {
   removeListener: jest.fn(),
   $: jest.fn().mockResolvedValue(null),
   evaluate: jest.fn().mockResolvedValue(false),
+  url: jest.fn().mockReturnValue('https://embed.example.com/player'),
   waitForTimeout: jest.fn().mockResolvedValue(null),
   waitForFunction: jest.fn().mockResolvedValue(null),
   frames: jest.fn().mockReturnValue([{

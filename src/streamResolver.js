@@ -382,12 +382,22 @@ class StreamResolver {
         return null;
       }
 
+      // Use the actual page URL as Referer — after iframe navigation this may differ from embedUrl
+      const actualPageUrl = page.url();
+      let streamReferer;
+      try {
+        streamReferer = new URL(actualPageUrl).origin !== 'null' ? actualPageUrl : embedUrl;
+      } catch (_) {
+        streamReferer = embedUrl;
+      }
+
       // Collect cookies for the detected stream URL
       const cookies = await context.cookies(streamInfo.url).catch(() => []);
       const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
 
       const headers = {
-        Referer: embedUrl,
+        Referer: streamReferer,
+        Origin: (() => { try { return new URL(streamReferer).origin; } catch (_) { return undefined; } })(),
         'User-Agent': userAgent,
       };
       if (cookieHeader) {
