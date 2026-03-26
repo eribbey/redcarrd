@@ -306,20 +306,35 @@ class StreamResolver {
         timeout: Math.min(timeout * 2, 90000),
       });
 
-      // Check if page has embed iframes — if so, we need more detection time
-      const hasEmbedIframes = await page.evaluate(() => {
-        return Array.from(document.querySelectorAll('iframe'))
-          .some((f) => f.src && !f.src.includes('ad.') && !f.src.includes('ads.') && !f.src.includes('google'));
-      }).catch(() => false);
+      // Extract inner embed iframe URL (the actual player page)
+      const innerEmbedUrl = await page.evaluate(() => {
+        const iframes = Array.from(document.querySelectorAll('iframe'));
+        for (const iframe of iframes) {
+          const src = iframe.src || '';
+          if (src && !src.includes('ad.') && !src.includes('ads.') && !src.includes('google') && !src.includes('about:blank')) {
+            return src;
+          }
+        }
+        return null;
+      }).catch(() => null);
 
-      const effectiveTimeout = hasEmbedIframes ? timeout + 15000 : timeout;
+      // If there's an inner embed iframe, navigate directly to it
+      // This avoids nested cross-origin iframe issues that block request interception
+      if (innerEmbedUrl) {
+        this.logger.info('Found inner embed iframe, navigating directly', { innerEmbedUrl, parentUrl: embedUrl });
+        await page.goto(innerEmbedUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: Math.min(timeout, 30000),
+          referer: embedUrl,
+        });
+      }
 
-      // Start network detection BEFORE waiting for iframes — captures all traffic
-      const streamUrlPromise = this._waitForStreamUrl(page, effectiveTimeout, {
+      // Start network detection
+      const streamUrlPromise = this._waitForStreamUrl(page, timeout, {
         enableConfigFallback: this.enableConfigFallback,
       });
 
-      // Wait for iframes to load and try to interact with them
+      // Wait for any further iframes and try autoplay
       await this._waitForIframesAndAutoplay(page, timeout);
 
       const streamInfo = await streamUrlPromise;
