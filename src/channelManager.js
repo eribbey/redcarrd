@@ -8,6 +8,7 @@ const https = require('https');
 const { createProgrammeFromEvent, buildDefaultStreamHeaders } = require('./scraper');
 const { StreamResolver } = require('./streamResolver');
 const Transmuxer = require('./transmuxer');
+const { createSolverClientFromEnv } = require('./solverClient');
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -47,6 +48,7 @@ class ChannelManager {
     this.timezone = timezoneName;
     this.streamResolver = new StreamResolver({ logger });
     this.transmuxer = new Transmuxer({ logger });
+    this.solverClient = createSolverClientFromEnv(logger);
     this.running = true;
   }
 
@@ -368,28 +370,68 @@ class ChannelManager {
   }
 
   async resolveStream(channel) {
-    const result = await this.streamResolver.resolve(channel.embedUrl, {
-      referer: channel.referer || process.env.FRONT_PAGE_URL || 'https://streamed.pk',
-      maxAttempts: parseInt(process.env.RESTREAM_MAX_ATTEMPTS) || 4,
-    });
-
-    if (!result) {
-      this.logger.warn('Stream resolution failed', { channelId: channel.id, embedUrl: channel.embedUrl });
-      return null;
+    // Build list of embed URLs to try: current first, then remaining sourceOptions
+    const embedUrls = [channel.embedUrl];
+    if (channel.sourceOptions?.length) {
+      for (const opt of channel.sourceOptions) {
+        if (opt.embedUrl && !embedUrls.includes(opt.embedUrl)) {
+          embedUrls.push(opt.embedUrl);
+        }
+      }
     }
 
-    channel.streamUrl = result.url;
-    channel.streamHeaders = result.headers;
-    channel.streamMode = result.type === 'hls' ? 'hls' : 'transmux';
-    channel.resolvedAt = Date.now();
+    // Pre-fetch solver cookies to bypass anti-bot (WASM lock, Cloudflare, etc.)
+    let solverCookies = null;
+    if (this.solverClient?.enabled) {
+      try {
+        this.logger.info('Pre-fetching solver cookies', { channelId: channel.id, embedUrl: channel.embedUrl });
+        const solverResult = await this.solverClient.solve(channel.embedUrl);
+        if (solverResult?.normalizedCookies?.length) {
+          solverCookies = solverResult.normalizedCookies;
+          this.logger.info('Solver cookies obtained', { channelId: channel.id, cookieCount: solverCookies.length });
+        }
+      } catch (error) {
+        this.logger.warn('Solver pre-fetch failed', { channelId: channel.id, error: error.message });
+      }
+    }
 
-    this.logger.info('Stream resolved', {
-      channelId: channel.id,
-      type: result.type,
-      streamMode: channel.streamMode,
-    });
+    // Try each embed URL until one resolves
+    for (const embedUrl of embedUrls) {
+      this.logger.info('Attempting stream resolution', {
+        channelId: channel.id,
+        embedUrl,
+        sourceIndex: embedUrls.indexOf(embedUrl) + 1,
+        totalSources: embedUrls.length,
+      });
 
-    return result;
+      const result = await this.streamResolver.resolve(embedUrl, {
+        referer: channel.referer || process.env.FRONT_PAGE_URL || 'https://streamed.pk',
+        maxAttempts: parseInt(process.env.RESTREAM_MAX_ATTEMPTS) || 4,
+        solverCookies,
+      });
+
+      if (result) {
+        channel.embedUrl = embedUrl; // Update to the working source
+        channel.streamUrl = result.url;
+        channel.streamHeaders = result.headers;
+        channel.streamMode = result.type === 'hls' ? 'hls' : 'transmux';
+        channel.resolvedAt = Date.now();
+
+        this.logger.info('Stream resolved', {
+          channelId: channel.id,
+          type: result.type,
+          streamMode: channel.streamMode,
+          embedUrl,
+        });
+
+        return result;
+      }
+
+      this.logger.warn('Source failed, trying next', { channelId: channel.id, embedUrl });
+    }
+
+    this.logger.warn('All sources exhausted', { channelId: channel.id, sourcesTried: embedUrls.length });
+    return null;
   }
 
   async ensureTransmuxed(channel) {
