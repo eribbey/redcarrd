@@ -94,6 +94,37 @@ const ANTI_DETECTION_SCRIPT = () => {
   Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
   Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4] });
   window.chrome = window.chrome || { runtime: {} };
+
+  // Override User-Agent Client Hints API to hide HeadlessChrome
+  if (navigator.userAgentData) {
+    const brandOverrides = [
+      { brand: 'Google Chrome', version: '122' },
+      { brand: 'Chromium', version: '122' },
+      { brand: 'Not(A:Brand', version: '24' },
+    ];
+    Object.defineProperty(navigator, 'userAgentData', {
+      get: () => ({
+        brands: brandOverrides,
+        mobile: false,
+        platform: 'Windows',
+        getHighEntropyValues: () =>
+          Promise.resolve({
+            brands: brandOverrides,
+            mobile: false,
+            platform: 'Windows',
+            platformVersion: '10.0.0',
+            architecture: 'x86',
+            model: '',
+            uaFullVersion: '122.0.0.0',
+            fullVersionList: brandOverrides.map((b) => ({
+              brand: b.brand,
+              version: b.version + '.0.0.0',
+            })),
+          }),
+      }),
+    });
+  }
+
   const originalQuery = window.navigator.permissions?.query;
   if (originalQuery) {
     window.navigator.permissions.query = (parameters) =>
@@ -260,6 +291,10 @@ class StreamResolver {
         origin = undefined;
       }
 
+      // Extract Chrome version from user agent for consistent Client Hints
+      const chromeVersionMatch = userAgent.match(/Chrome\/(\d+)/);
+      const chromeVersion = chromeVersionMatch ? chromeVersionMatch[1] : '122';
+
       context = await browser.newContext({
         userAgent,
         viewport,
@@ -268,6 +303,10 @@ class StreamResolver {
         locale: 'en-US',
         extraHTTPHeaders: {
           'Accept-Language': 'en-US,en;q=0.9',
+          // Override sec-ch-ua headers to mask HeadlessChrome
+          'sec-ch-ua': `"Google Chrome";v="${chromeVersion}", "Chromium";v="${chromeVersion}", "Not(A:Brand";v="24"`,
+          'sec-ch-ua-mobile': '?0',
+          'sec-ch-ua-platform': '"Windows"',
         },
       });
 
