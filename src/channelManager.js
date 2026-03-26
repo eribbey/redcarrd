@@ -552,11 +552,20 @@ class ChannelManager {
     const rapidFailThreshold = parseInt(process.env.HEALTH_RAPID_FAIL_THRESHOLD) || 3;
     const rapidFailWindowMs = parseInt(process.env.HEALTH_RAPID_FAIL_WINDOW_MS) || 600000;
 
+    // Skip health check for freshly resolved channels — give them a grace period
+    if (channel.status === 'resolved' && channel.resolvedAt && Date.now() - channel.resolvedAt < 30000) {
+      channel.status = 'healthy';
+      channel.lastHealthCheck = Date.now();
+      this.logger.debug('Granting initial health pass to freshly resolved channel', { channelId: channel.id });
+      return;
+    }
+
     try {
       const headers = this.buildStreamHeaders(channel);
       const isHls = this.isHlsChannel(channel);
 
       let healthy;
+      let reason = '';
       if (isHls) {
         const response = await axios.get(channel.streamUrl, {
           headers,
@@ -568,7 +577,13 @@ class ChannelManager {
         healthy = response.status >= 200 && response.status < 300;
         if (healthy) {
           const body = response.data?.toString('utf8') || '';
-          healthy = body.includes('#EXTINF');
+          // Accept both media playlists (#EXTINF) and multi-variant playlists (#EXT-X-STREAM-INF)
+          healthy = body.includes('#EXTINF') || body.includes('#EXT-X-STREAM-INF');
+          if (!healthy) {
+            reason = `HTTP ${response.status} but invalid manifest (${body.substring(0, 100)})`;
+          }
+        } else {
+          reason = `HTTP ${response.status}`;
         }
       } else {
         const response = await axios.head(channel.streamUrl, {
@@ -578,13 +593,17 @@ class ChannelManager {
           httpsAgent: createHttpsAgent(),
         });
         healthy = response.status >= 200 && response.status < 300;
+        if (!healthy) {
+          reason = `HTTP ${response.status}`;
+        }
       }
 
       if (healthy) {
         channel.status = 'healthy';
         channel.lastHealthCheck = Date.now();
+        this.logger.debug('Health check passed', { channelId: channel.id });
       } else {
-        this._markUnhealthy(channel, 'non-2xx or invalid manifest', rapidFailThreshold, rapidFailWindowMs);
+        this._markUnhealthy(channel, reason || 'non-2xx or invalid manifest', rapidFailThreshold, rapidFailWindowMs);
       }
     } catch (error) {
       this._markUnhealthy(channel, error.message, rapidFailThreshold, rapidFailWindowMs);
