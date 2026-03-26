@@ -526,14 +526,19 @@ class StreamResolver {
             return;
           }
 
-          // For XHR/fetch/JSON responses, inspect the body for stream URLs
+          // Skip JavaScript/CSS files — they contain player code with HLS strings but aren't streams
+          if (/javascript|css/i.test(contentType) || /\.(js|css)(\?|$)/i.test(url)) {
+            return;
+          }
+
+          // For XHR/fetch/JSON/text responses, inspect the body for stream URLs
           // This catches APIs like embedsports.top/fetch that return stream URLs in JSON
-          if (status >= 200 && status < 300 && /json|text|javascript/i.test(contentType)) {
+          if (status >= 200 && status < 300 && /json|text|html/i.test(contentType)) {
             response.text().then((body) => {
               if (!body || done) return;
 
               // Log embed-server API responses for diagnostics
-              if (/\/fetch/i.test(url) || /embed/i.test(url)) {
+              if (/\/fetch\b/i.test(url)) {
                 this.logger.debug('Embed API response', {
                   url: url.substring(0, 200),
                   bodyPreview: body.substring(0, 500),
@@ -541,22 +546,22 @@ class StreamResolver {
               }
 
               // Scan for stream URLs in the response body
-              const m3u8Match = body.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+              const m3u8Match = body.match(/https?:\/\/[^\s"'<>\\]+\.m3u8[^\s"'<>\\]*/i);
               if (m3u8Match) {
                 this.logger.info('HLS URL found in API response', { url: url.substring(0, 200), streamUrl: m3u8Match[0] });
                 finish(null, { type: 'hls', url: m3u8Match[0] });
                 return;
               }
 
-              const mpdMatch = body.match(/https?:\/\/[^\s"'<>]+\.mpd[^\s"'<>]*/i);
+              const mpdMatch = body.match(/https?:\/\/[^\s"'<>\\]+\.mpd[^\s"'<>\\]*/i);
               if (mpdMatch) {
                 this.logger.info('DASH URL found in API response', { url: url.substring(0, 200), streamUrl: mpdMatch[0] });
                 finish(null, { type: 'dash', url: mpdMatch[0] });
                 return;
               }
 
-              // Check for HLS manifest content in the body itself
-              if (body.includes('#EXTM3U')) {
+              // Check for HLS manifest content — must start with #EXTM3U (not buried in JS)
+              if (/^\s*#EXTM3U/i.test(body)) {
                 this.logger.info('HLS manifest found in response body', { url: url.substring(0, 200) });
                 finish(null, { type: 'hls', url });
                 return;
@@ -568,7 +573,7 @@ class StreamResolver {
           if (/\/(hls|live|stream|playlist)\//i.test(url) && !isAdUrl(url)) {
             if (status >= 200 && status < 300) {
               response.text().then((body) => {
-                if (body && body.includes('#EXTM3U')) {
+                if (body && /^\s*#EXTM3U/i.test(body)) {
                   this.logger.info('HLS detected via response body inspection', { url: url.substring(0, 200) });
                   finish(null, { type: 'hls', url });
                 }
