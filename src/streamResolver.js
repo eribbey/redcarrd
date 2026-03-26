@@ -507,13 +507,14 @@ class StreamResolver {
         } catch (_) {}
       };
 
-      // Detect HLS/DASH via response content-type (for extensionless URLs) or response body
+      // Detect HLS/DASH via response content-type, body, or embedded URLs in JSON responses
       const onResponse = (response) => {
         try {
           const url = response.url();
           if (isAdUrl(url)) return;
 
           const contentType = (response.headers()['content-type'] || '').toLowerCase();
+          const status = response.status();
 
           // Detect via content-type
           if (/mpegurl/i.test(contentType)) {
@@ -525,12 +526,47 @@ class StreamResolver {
             return;
           }
 
+          // For XHR/fetch/JSON responses, inspect the body for stream URLs
+          // This catches APIs like embedsports.top/fetch that return stream URLs in JSON
+          if (status >= 200 && status < 300 && /json|text|javascript/i.test(contentType)) {
+            response.text().then((body) => {
+              if (!body || done) return;
+
+              // Log embed-server API responses for diagnostics
+              if (/\/fetch/i.test(url) || /embed/i.test(url)) {
+                this.logger.debug('Embed API response', {
+                  url: url.substring(0, 200),
+                  bodyPreview: body.substring(0, 500),
+                });
+              }
+
+              // Scan for stream URLs in the response body
+              const m3u8Match = body.match(/https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*/i);
+              if (m3u8Match) {
+                this.logger.info('HLS URL found in API response', { url: url.substring(0, 200), streamUrl: m3u8Match[0] });
+                finish(null, { type: 'hls', url: m3u8Match[0] });
+                return;
+              }
+
+              const mpdMatch = body.match(/https?:\/\/[^\s"'<>]+\.mpd[^\s"'<>]*/i);
+              if (mpdMatch) {
+                this.logger.info('DASH URL found in API response', { url: url.substring(0, 200), streamUrl: mpdMatch[0] });
+                finish(null, { type: 'dash', url: mpdMatch[0] });
+                return;
+              }
+
+              // Check for HLS manifest content in the body itself
+              if (body.includes('#EXTM3U')) {
+                this.logger.info('HLS manifest found in response body', { url: url.substring(0, 200) });
+                finish(null, { type: 'hls', url });
+                return;
+              }
+            }).catch(() => {});
+          }
+
           // Detect via URL patterns that don't use file extensions
-          // Many streaming servers use paths like /hls/channel or /live/stream
           if (/\/(hls|live|stream|playlist)\//i.test(url) && !isAdUrl(url)) {
-            const status = response.status();
             if (status >= 200 && status < 300) {
-              // Try to read the body to check if it's an HLS manifest
               response.text().then((body) => {
                 if (body && body.includes('#EXTM3U')) {
                   this.logger.info('HLS detected via response body inspection', { url: url.substring(0, 200) });
