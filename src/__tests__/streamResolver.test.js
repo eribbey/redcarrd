@@ -314,6 +314,38 @@ describe('StreamResolver', () => {
       expect(result.type).toBe('mp4');
       expect(result.url).toBe('https://cdn.example.com/video.mp4');
     }, 20000);
+
+    test('should capture cookies from all domains, not just stream URL domain', async () => {
+      jest.useRealTimers();
+      setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
+
+      // Mock cookies() with no args to return all cookies from the context
+      mockContext.cookies.mockImplementation((...args) => {
+        if (args.length === 0) {
+          return Promise.resolve([
+            { name: 'cf_clearance', value: 'abc', domain: '.embed.example.com' },
+            { name: 'session', value: 'xyz', domain: '.cdn.example.com' },
+            { name: '__token', value: '999', domain: '.player.example.com' },
+          ]);
+        }
+        // Legacy call with URL — return filtered
+        return Promise.resolve([
+          { name: 'session', value: 'xyz', domain: '.cdn.example.com' },
+        ]);
+      });
+
+      const result = await resolver.resolve('https://embed.example.com/player', {
+        timeout: 5000,
+        maxAttempts: 1,
+      });
+
+      // Should have called cookies() with no args to get ALL cookies
+      expect(mockContext.cookies).toHaveBeenCalledWith();
+      // Cookie header should contain all cookies
+      expect(result.headers.Cookie).toContain('cf_clearance=abc');
+      expect(result.headers.Cookie).toContain('session=xyz');
+      expect(result.headers.Cookie).toContain('__token=999');
+    });
   });
 
   describe('browser management', () => {

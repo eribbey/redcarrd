@@ -453,8 +453,9 @@ class StreamResolver {
         streamReferer = embedUrl;
       }
 
-      // Collect cookies for the detected stream URL
-      const cookies = await context.cookies(streamInfo.url).catch(() => []);
+      // Collect ALL cookies from the browser context — embed pages set critical
+      // auth cookies on their own domain that must be forwarded to the CDN
+      const cookies = await context.cookies().catch(() => []);
       const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
 
       const headers = {
