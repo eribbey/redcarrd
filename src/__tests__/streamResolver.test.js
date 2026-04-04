@@ -404,4 +404,29 @@ describe('StreamResolver', () => {
       expect(r.browserIdleTimeoutMinutes).toBe(60);
     });
   });
+
+  describe('anti-detection', () => {
+    test('DEFAULT_USER_AGENTS should use Chrome version >= 130', () => {
+      const { DEFAULT_USER_AGENTS } = require('../streamResolver');
+      DEFAULT_USER_AGENTS.forEach((ua) => {
+        const match = ua.match(/Chrome\/(\d+)/);
+        if (match) {
+          expect(parseInt(match[1], 10)).toBeGreaterThanOrEqual(130);
+        }
+      });
+    });
+
+    test('ANTI_DETECTION_SCRIPT should be a function', () => {
+      const { ANTI_DETECTION_SCRIPT } = require('../streamResolver');
+      expect(typeof ANTI_DETECTION_SCRIPT).toBe('function');
+    });
+
+    test('PLAYWRIGHT_LAUNCH_ARGS should include disable-blink-features for automation detection', () => {
+      const { PLAYWRIGHT_LAUNCH_ARGS } = require('../streamResolver');
+      const hasBlinkFlag = PLAYWRIGHT_LAUNCH_ARGS.some(
+        (arg) => arg.includes('disable-blink-features') && arg.includes('AutomationControlled')
+      );
+      expect(hasBlinkFlag).toBe(true);
+    });
+  });
 });

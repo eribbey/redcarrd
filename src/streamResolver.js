@@ -3,10 +3,10 @@
 const { chromium } = require('playwright');
 
 const DEFAULT_USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0',
 ];
 
 const PLAYWRIGHT_LAUNCH_ARGS = [
@@ -15,7 +15,8 @@ const PLAYWRIGHT_LAUNCH_ARGS = [
   '--autoplay-policy=no-user-gesture-required',
   '--disable-notifications',
   '--mute-audio',
-  '--disable-features=IsolateOrigins,site-per-process,AutomationControlled',
+  '--disable-features=IsolateOrigins,site-per-process',
+  '--disable-blink-features=AutomationControlled',
   '--disable-site-isolation-trials',
 ];
 
@@ -89,18 +90,64 @@ const MP4_GRACE_PERIOD_MS = parseInt(process.env.MP4_GRACE_PERIOD_MS, 10) || 500
  * Overrides webdriver property, spoofs plugins, disables popups, etc.
  */
 const ANTI_DETECTION_SCRIPT = () => {
+  // Block popups
   window.open = () => null;
-  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-  Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4] });
-  window.chrome = window.chrome || { runtime: {} };
 
-  // Override User-Agent Client Hints API to hide HeadlessChrome
+  // Hide webdriver property (primary headless signal)
+  Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+  // Spoof languages
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+
+  // Spoof plugins as realistic PluginArray-like object
+  const pluginData = [
+    { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+    { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+    { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+  ];
+  const pluginArray = Object.create(PluginArray.prototype);
+  pluginData.forEach((p, i) => {
+    const plugin = Object.create(Plugin.prototype);
+    Object.defineProperties(plugin, {
+      name: { get: () => p.name },
+      filename: { get: () => p.filename },
+      description: { get: () => p.description },
+      length: { get: () => 0 },
+    });
+    Object.defineProperty(pluginArray, i, { get: () => plugin });
+  });
+  Object.defineProperty(pluginArray, 'length', { get: () => pluginData.length });
+  Object.defineProperty(pluginArray, 'namedItem', {
+    value: (name) => pluginData.find((p) => p.name === name) || null,
+  });
+  Object.defineProperty(pluginArray, 'item', {
+    value: (index) => pluginArray[index] || null,
+  });
+  Object.defineProperty(navigator, 'plugins', { get: () => pluginArray });
+
+  // Spoof hardware fingerprints
+  Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+  Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+  Object.defineProperty(navigator, 'platform', { get: () => 'Win32' });
+
+  // Chrome runtime object
+  window.chrome = window.chrome || {};
+  window.chrome.runtime = window.chrome.runtime || {};
+  window.chrome.loadTimes = window.chrome.loadTimes || (() => ({}));
+  window.chrome.csi = window.chrome.csi || (() => ({}));
+
+  // Remove Playwright/CDP-specific properties from window
+  const cdcKeys = Object.keys(window).filter(
+    (key) => /^cdc_|^__playwright|^__pwPage/.test(key)
+  );
+  cdcKeys.forEach((key) => { try { delete window[key]; } catch (_) {} });
+
+  // Override User-Agent Client Hints API
   if (navigator.userAgentData) {
     const brandOverrides = [
-      { brand: 'Google Chrome', version: '122' },
-      { brand: 'Chromium', version: '122' },
-      { brand: 'Not(A:Brand', version: '24' },
+      { brand: 'Google Chrome', version: '131' },
+      { brand: 'Chromium', version: '131' },
+      { brand: 'Not_A Brand', version: '24' },
     ];
     Object.defineProperty(navigator, 'userAgentData', {
       get: () => ({
@@ -112,10 +159,10 @@ const ANTI_DETECTION_SCRIPT = () => {
             brands: brandOverrides,
             mobile: false,
             platform: 'Windows',
-            platformVersion: '10.0.0',
+            platformVersion: '15.0.0',
             architecture: 'x86',
             model: '',
-            uaFullVersion: '122.0.0.0',
+            uaFullVersion: '131.0.0.0',
             fullVersionList: brandOverrides.map((b) => ({
               brand: b.brand,
               version: b.version + '.0.0.0',
@@ -125,13 +172,28 @@ const ANTI_DETECTION_SCRIPT = () => {
     });
   }
 
+  // Permissions API
   const originalQuery = window.navigator.permissions?.query;
   if (originalQuery) {
     window.navigator.permissions.query = (parameters) =>
       parameters?.name === 'notifications'
-        ? Promise.resolve({ state: 'denied' })
+        ? Promise.resolve({ state: Notification.permission, onchange: null })
         : originalQuery(parameters);
   }
+
+  // WebGL vendor/renderer spoofing to mask headless GPU
+  const getParameter = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function (param) {
+    if (param === 37445) return 'Google Inc. (Intel)';
+    if (param === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630, OpenGL 4.1)';
+    return getParameter.call(this, param);
+  };
+  const getParameter2 = WebGL2RenderingContext.prototype.getParameter;
+  WebGL2RenderingContext.prototype.getParameter = function (param) {
+    if (param === 37445) return 'Google Inc. (Intel)';
+    if (param === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630, OpenGL 4.1)';
+    return getParameter2.call(this, param);
+  };
 };
 
 /**
@@ -293,7 +355,7 @@ class StreamResolver {
 
       // Extract Chrome version from user agent for consistent Client Hints
       const chromeVersionMatch = userAgent.match(/Chrome\/(\d+)/);
-      const chromeVersion = chromeVersionMatch ? chromeVersionMatch[1] : '122';
+      const chromeVersion = chromeVersionMatch ? chromeVersionMatch[1] : '131';
 
       context = await browser.newContext({
         userAgent,
