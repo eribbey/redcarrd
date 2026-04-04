@@ -604,21 +604,51 @@ class ChannelManager {
         channel.lastHealthCheck = Date.now();
         this.logger.info('Health check passed', { channelId: channel.id, streamUrl: channel.streamUrl?.substring(0, 100) });
       } else {
+        const isAuthFailure = reason.startsWith('HTTP 403') || reason.startsWith('HTTP 410');
         this.logger.warn('Health check failed', {
           channelId: channel.id,
           streamUrl: channel.streamUrl?.substring(0, 100),
           reason,
+          isAuthFailure,
           referer: headers.Referer?.substring(0, 100),
         });
-        this._markUnhealthy(channel, reason || 'non-2xx or invalid manifest', rapidFailThreshold, rapidFailWindowMs);
+
+        if (isAuthFailure) {
+          // Auth/token failures are not stream death — immediately queue for re-resolution
+          // without counting against the rapid fail threshold
+          channel.status = 'pending';
+          channel.streamUrl = null;
+          channel.resolvedAt = null;
+          channel.failCount = 0;
+          channel.nextRetryAt = null;
+          this.logger.info('Auth failure detected, queued for immediate re-resolution', {
+            channelId: channel.id, reason,
+          });
+        } else {
+          this._markUnhealthy(channel, reason || 'non-2xx or invalid manifest', rapidFailThreshold, rapidFailWindowMs);
+        }
       }
     } catch (error) {
+      const isAuthError = error.response?.status === 403 || error.response?.status === 410;
       this.logger.warn('Health check error', {
         channelId: channel.id,
         streamUrl: channel.streamUrl?.substring(0, 100),
         error: error.message,
+        isAuthError,
       });
-      this._markUnhealthy(channel, error.message, rapidFailThreshold, rapidFailWindowMs);
+
+      if (isAuthError) {
+        channel.status = 'pending';
+        channel.streamUrl = null;
+        channel.resolvedAt = null;
+        channel.failCount = 0;
+        channel.nextRetryAt = null;
+        this.logger.info('Auth error in health check, queued for re-resolution', {
+          channelId: channel.id,
+        });
+      } else {
+        this._markUnhealthy(channel, error.message, rapidFailThreshold, rapidFailWindowMs);
+      }
     }
   }
 

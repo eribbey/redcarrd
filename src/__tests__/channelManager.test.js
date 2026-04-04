@@ -403,7 +403,7 @@ describe('ChannelManager', () => {
     test('marks channel dead after rapid fail cycles within time window', async () => {
       const manager = new ChannelManager({ lifetimeHours: 24, logger });
 
-      axios.get.mockResolvedValue({ status: 403, data: Buffer.from(''), headers: {} });
+      axios.get.mockResolvedValue({ status: 500, data: Buffer.from(''), headers: {} });
 
       const now = Date.now();
       const channel = {
@@ -421,7 +421,7 @@ describe('ChannelManager', () => {
     test('does not mark dead if failures are outside time window', async () => {
       const manager = new ChannelManager({ lifetimeHours: 24, logger });
 
-      axios.get.mockResolvedValue({ status: 403, data: Buffer.from(''), headers: {} });
+      axios.get.mockResolvedValue({ status: 500, data: Buffer.from(''), headers: {} });
 
       const now = Date.now();
       const channel = {
@@ -434,6 +434,63 @@ describe('ChannelManager', () => {
 
       await manager.checkChannelHealth(channel);
       expect(channel.status).toBe('pending');
+    });
+
+    test('403 auth failure queues for re-resolution without counting rapid fail', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+
+      axios.get.mockResolvedValue({ status: 403, data: Buffer.from(''), headers: {} });
+
+      const now = Date.now();
+      const channel = {
+        id: 'ch-auth', status: 'healthy', streamUrl: 'https://s.test/live.m3u8',
+        streamMode: 'hls', embedUrl: 'https://embed.test/1',
+        requestHeaders: {}, streamHeaders: {}, cookies: [],
+        healthFailCount: 0,
+        // Even with 2 prior failures, a 403 should NOT push to dead
+        healthFailTimestamps: [now - 120000, now - 60000],
+      };
+
+      await manager.checkChannelHealth(channel);
+      expect(channel.status).toBe('pending');
+      expect(channel.streamUrl).toBeNull();
+      expect(channel.resolvedAt).toBeNull();
+      expect(channel.failCount).toBe(0);
+    });
+
+    test('410 auth failure queues for re-resolution', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+
+      axios.get.mockResolvedValue({ status: 410, data: Buffer.from(''), headers: {} });
+
+      const channel = {
+        id: 'ch-gone', status: 'healthy', streamUrl: 'https://s.test/live.m3u8',
+        streamMode: 'hls', embedUrl: 'https://embed.test/1',
+        requestHeaders: {}, streamHeaders: {}, cookies: [],
+        healthFailCount: 0, healthFailTimestamps: [],
+      };
+
+      await manager.checkChannelHealth(channel);
+      expect(channel.status).toBe('pending');
+      expect(channel.streamUrl).toBeNull();
+    });
+
+    test('non-auth failure (500) still counts toward rapid fail threshold', async () => {
+      const manager = new ChannelManager({ lifetimeHours: 24, logger });
+
+      axios.get.mockResolvedValue({ status: 500, data: Buffer.from(''), headers: {} });
+
+      const now = Date.now();
+      const channel = {
+        id: 'ch-500', status: 'healthy', streamUrl: 'https://s.test/live.m3u8',
+        streamMode: 'hls', embedUrl: 'https://embed.test/1',
+        requestHeaders: {}, streamHeaders: {}, cookies: [],
+        healthFailCount: 0,
+        healthFailTimestamps: [now - 120000, now - 60000],
+      };
+
+      await manager.checkChannelHealth(channel);
+      expect(channel.status).toBe('dead');
     });
   });
 
