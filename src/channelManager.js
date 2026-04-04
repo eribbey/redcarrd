@@ -470,7 +470,7 @@ class ChannelManager {
 
   getNextChannelForResolution() {
     const now = Date.now();
-    const ttlMs = (parseInt(process.env.STREAM_URL_TTL_MINUTES) || 30) * 60 * 1000;
+    const ttlMs = (parseInt(process.env.STREAM_URL_TTL_MINUTES) || 10) * 60 * 1000;
     const maxFailures = parseInt(process.env.RESOLUTION_MAX_FAILURES) || 5;
 
     // Priority 1: pending channels
