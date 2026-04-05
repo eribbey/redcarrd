@@ -424,7 +424,7 @@ class StreamResolver {
       // Navigate to embed page
       this.logger.info('Navigating to embed page', { embedUrl, attempt: attempt + 1 });
       await page.goto(embedUrl, {
-        waitUntil: 'domcontentloaded',
+        waitUntil: 'load',
         timeout: Math.min(timeout * 2, 90000),
       });
 
@@ -445,11 +445,14 @@ class StreamResolver {
       if (innerEmbedUrl) {
         this.logger.info('Found inner embed iframe, navigating directly', { innerEmbedUrl, parentUrl: embedUrl });
         await page.goto(innerEmbedUrl, {
-          waitUntil: 'domcontentloaded',
+          waitUntil: 'load',
           timeout: Math.min(timeout, 30000),
           referer: embedUrl,
         });
       }
+
+      // Wait for WASM/scripts to initialize after page load
+      await page.waitForTimeout(2000);
 
       // Start network detection
       const streamUrlPromise = this._waitForStreamUrl(page, timeout, {
