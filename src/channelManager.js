@@ -196,7 +196,7 @@ class ChannelManager {
   generatePlaylist(baseUrl) {
     const lines = ['#EXTM3U'];
     this.channels
-      .filter((ch) => ch.status === 'healthy' && ch.streamUrl)
+      .filter((ch) => (ch.status === 'healthy' || ch.status === 'resolved') && ch.streamUrl)
       .forEach((channel) => {
         lines.push(
           `#EXTINF:-1 tvg-id="${channel.id}" group-title="${channel.category}",${channel.title || channel.category}`,
@@ -209,7 +209,7 @@ class ChannelManager {
   generateEpg() {
     const xml = create('tv', { version: '1.0', encoding: 'UTF-8' });
     const healthyIds = new Set(
-      this.channels.filter((ch) => ch.status === 'healthy').map((ch) => ch.id)
+      this.channels.filter((ch) => ch.status === 'healthy' || ch.status === 'resolved').map((ch) => ch.id)
     );
 
     this.channels.filter((ch) => healthyIds.has(ch.id)).forEach((channel) => {
@@ -516,10 +516,13 @@ class ChannelManager {
       const result = await this.resolveStream(channel);
 
       if (result) {
-        channel.status = 'resolved';
+        // Promote directly to healthy — Playwright already proved the stream exists.
+        // Waiting for a separate HTTP health check would fail on CDNs that reject
+        // non-browser requests (different TLS fingerprint, missing session cookies).
+        channel.status = 'healthy';
         channel.failCount = 0;
         channel.nextRetryAt = null;
-        this.logger.info('Channel resolved', { channelId: channel.id, streamUrl: result.url });
+        this.logger.info('Channel resolved and promoted to healthy', { channelId: channel.id, streamUrl: result.url });
       } else {
         channel.failCount = (channel.failCount || 0) + 1;
         if (channel.failCount >= maxFailures) {
@@ -568,11 +571,17 @@ class ChannelManager {
     const rapidFailThreshold = parseInt(process.env.HEALTH_RAPID_FAIL_THRESHOLD) || 3;
     const rapidFailWindowMs = parseInt(process.env.HEALTH_RAPID_FAIL_WINDOW_MS) || 600000;
 
-    // Skip health check for freshly resolved channels — give them a grace period
-    if (channel.status === 'resolved' && channel.resolvedAt && Date.now() - channel.resolvedAt < 30000) {
-      channel.status = 'healthy';
+    // Trust stream URLs for a grace period after resolution — the Playwright browser
+    // already validated the stream exists. Many CDNs reject follow-up axios requests
+    // (different TLS fingerprint, missing browser session) so health checks via HTTP
+    // will 403 even though the stream works fine for real browsers/IPTV clients.
+    const healthGracePeriodMs = parseInt(process.env.HEALTH_GRACE_PERIOD_MS) || 300000; // 5 min default
+    if (channel.resolvedAt && Date.now() - channel.resolvedAt < healthGracePeriodMs) {
+      if (channel.status !== 'healthy') {
+        channel.status = 'healthy';
+        this.logger.debug('Granting health pass to recently resolved channel', { channelId: channel.id });
+      }
       channel.lastHealthCheck = Date.now();
-      this.logger.debug('Granting initial health pass to freshly resolved channel', { channelId: channel.id });
       return;
     }
 

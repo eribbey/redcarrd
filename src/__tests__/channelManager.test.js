@@ -240,7 +240,7 @@ describe('ChannelManager', () => {
 
     const playlist = manager.generatePlaylist('http://localhost:3005');
     expect(playlist).toContain('ch-1');
-    expect(playlist).not.toContain('ch-2');
+    expect(playlist).toContain('ch-2'); // resolved channels with streamUrl are also included
     expect(playlist).not.toContain('ch-3');
   });
 
@@ -290,7 +290,7 @@ describe('ChannelManager', () => {
   });
 
   describe('resolution loop', () => {
-    test('resolveAndUpdateStatus sets resolved on success', async () => {
+    test('resolveAndUpdateStatus promotes to healthy on success', async () => {
       const manager = new ChannelManager({ lifetimeHours: 24, logger });
       manager.streamResolver = {
         resolve: jest.fn().mockResolvedValue({ url: 'https://s.test/live.m3u8', type: 'hls', headers: {} }),
@@ -301,7 +301,7 @@ describe('ChannelManager', () => {
 
       await manager.resolveAndUpdateStatus(channel);
 
-      expect(channel.status).toBe('resolved');
+      expect(channel.status).toBe('healthy');
       expect(channel.streamUrl).toBe('https://s.test/live.m3u8');
       expect(channel.failCount).toBe(0);
       expect(channel.resolvedAt).toBeGreaterThan(0);
@@ -351,10 +351,11 @@ describe('ChannelManager', () => {
       });
 
       const channel = {
-        id: 'ch-1', status: 'resolved', streamUrl: 'https://s.test/live.m3u8',
+        id: 'ch-1', status: 'healthy', streamUrl: 'https://s.test/live.m3u8',
         streamMode: 'hls', embedUrl: 'https://embed.test/1',
         requestHeaders: {}, streamHeaders: {}, cookies: [],
         healthFailCount: 0, healthFailTimestamps: [],
+        resolvedAt: Date.now() - 600000, // resolved 10 min ago, past grace period
       };
 
       await manager.checkChannelHealth(channel);
@@ -372,10 +373,11 @@ describe('ChannelManager', () => {
       });
 
       const channel = {
-        id: 'ch-1', status: 'resolved', streamUrl: 'https://s.test/live.m3u8',
+        id: 'ch-1', status: 'healthy', streamUrl: 'https://s.test/live.m3u8',
         streamMode: 'hls', embedUrl: 'https://embed.test/1',
         requestHeaders: {}, streamHeaders: {}, cookies: [],
         healthFailCount: 0, healthFailTimestamps: [],
+        resolvedAt: Date.now() - 600000, // past grace period
       };
 
       await manager.checkChannelHealth(channel);
@@ -393,6 +395,7 @@ describe('ChannelManager', () => {
         streamMode: 'hls', embedUrl: 'https://embed.test/1',
         requestHeaders: {}, streamHeaders: {}, cookies: [],
         healthFailCount: 0, healthFailTimestamps: [],
+        resolvedAt: Date.now() - 600000,
       };
 
       await manager.checkChannelHealth(channel);
@@ -411,7 +414,8 @@ describe('ChannelManager', () => {
         streamMode: 'hls', embedUrl: 'https://embed.test/1',
         requestHeaders: {}, streamHeaders: {}, cookies: [],
         healthFailCount: 0,
-        healthFailTimestamps: [now - 120000, now - 60000], // 2 recent failures within window
+        healthFailTimestamps: [now - 120000, now - 60000],
+        resolvedAt: now - 600000,
       };
 
       await manager.checkChannelHealth(channel);
@@ -429,7 +433,8 @@ describe('ChannelManager', () => {
         streamMode: 'hls', embedUrl: 'https://embed.test/1',
         requestHeaders: {}, streamHeaders: {}, cookies: [],
         healthFailCount: 0,
-        healthFailTimestamps: [now - 700000, now - 650000], // old failures outside 10min window
+        healthFailTimestamps: [now - 700000, now - 650000],
+        resolvedAt: now - 800000,
       };
 
       await manager.checkChannelHealth(channel);
@@ -447,8 +452,8 @@ describe('ChannelManager', () => {
         streamMode: 'hls', embedUrl: 'https://embed.test/1',
         requestHeaders: {}, streamHeaders: {}, cookies: [],
         healthFailCount: 0,
-        // Even with 2 prior failures, a 403 should NOT push to dead
         healthFailTimestamps: [now - 120000, now - 60000],
+        resolvedAt: now - 600000,
       };
 
       await manager.checkChannelHealth(channel);
@@ -468,6 +473,7 @@ describe('ChannelManager', () => {
         streamMode: 'hls', embedUrl: 'https://embed.test/1',
         requestHeaders: {}, streamHeaders: {}, cookies: [],
         healthFailCount: 0, healthFailTimestamps: [],
+        resolvedAt: Date.now() - 600000,
       };
 
       await manager.checkChannelHealth(channel);
@@ -487,6 +493,7 @@ describe('ChannelManager', () => {
         requestHeaders: {}, streamHeaders: {}, cookies: [],
         healthFailCount: 0,
         healthFailTimestamps: [now - 120000, now - 60000],
+        resolvedAt: now - 600000,
       };
 
       await manager.checkChannelHealth(channel);
@@ -543,15 +550,10 @@ describe('ChannelManager', () => {
       const channel = manager.getNextChannelForResolution();
       expect(channel).not.toBeNull();
       await manager.resolveAndUpdateStatus(channel);
-      expect(channel.status).toBe('resolved');
+      expect(channel.status).toBe('healthy'); // promoted directly on resolution
 
       playlist = manager.generatePlaylist('http://localhost:3005');
-      expect(playlist).not.toContain('ch-');
-
-      const hlsManifest = '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6.0,\nsegment0.ts\n';
-      axios.get.mockResolvedValue({ status: 200, data: Buffer.from(hlsManifest), headers: {} });
-      await manager.checkChannelHealth(channel);
-      expect(channel.status).toBe('healthy');
+      expect(playlist).toContain('ch-'); // healthy channels appear in playlist immediately
 
       playlist = manager.generatePlaylist('http://localhost:3005');
       expect(playlist).toContain(channel.id);
