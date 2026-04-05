@@ -687,6 +687,14 @@ class StreamResolver {
    */
   async _detectFromPlayerConfig(page) {
     const info = await page.evaluate(() => {
+      // Check for HLS.js-intercepted URL first (set by ANTI_DETECTION_SCRIPT)
+      if (window.__capturedStreamUrl) {
+        const url = window.__capturedStreamUrl;
+        const type = /\.m3u8(\?|$)/i.test(url) ? 'hls'
+          : /\.mpd(\?|$)/i.test(url) ? 'dash' : 'mp4';
+        return { url, type };
+      }
+
       function inferType(url, mime) {
         if (!url && !mime) return null;
         const target = (url || '').toLowerCase();

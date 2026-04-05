@@ -413,6 +413,32 @@ describe('StreamResolver', () => {
     });
   });
 
+  describe('_detectFromPlayerConfig with __capturedStreamUrl', () => {
+    test('should return captured HLS URL from __capturedStreamUrl', async () => {
+      jest.useRealTimers();
+
+      // evaluate is called for iframe check first, then config fallback
+      mockPage.evaluate
+        .mockResolvedValueOnce(false) // hasEmbedIframes check
+        .mockResolvedValueOnce([]) // iframe srcs in _waitForIframesAndAutoplay
+        .mockResolvedValue({ // config fallback — returns __capturedStreamUrl result
+          url: 'https://lb1.modifiles.fans/secure/abc/stream/index.m3u8',
+          type: 'hls',
+        });
+
+      // No network requests — rely on config fallback
+      resolver.enableConfigFallback = true;
+      const result = await resolver.resolve('https://embed.example.com/player', {
+        timeout: 500,
+        maxAttempts: 1,
+      });
+
+      expect(result).not.toBeNull();
+      expect(result.url).toBe('https://lb1.modifiles.fans/secure/abc/stream/index.m3u8');
+      expect(result.type).toBe('hls');
+    });
+  });
+
   describe('environment variable defaults', () => {
     test('should use default timeout when env not set', () => {
       const r = new StreamResolver({ logger });
