@@ -438,6 +438,35 @@ describe('StreamResolver', () => {
   });
 
   describe('anti-detection', () => {
+    test('ANTI_DETECTION_SCRIPT should set up HLS.js loadSource interception', () => {
+      const { ANTI_DETECTION_SCRIPT } = require('../streamResolver');
+
+      // Create a minimal browser-like environment for the script
+      const mockWindow = {
+        open: () => null,
+        chrome: {},
+        Hls: null, // HLS.js not loaded yet
+      };
+
+      // Provide stubs for browser globals the script references
+      const mockNavigator = {
+        webdriver: true,
+        languages: ['en'],
+        plugins: [],
+        hardwareConcurrency: 2,
+        deviceMemory: 2,
+        platform: 'Linux',
+        permissions: { query: () => Promise.resolve({ state: 'default' }) },
+        userAgentData: null,
+      };
+
+      const scriptSource = ANTI_DETECTION_SCRIPT.toString();
+      // Verify the script contains HLS.js interception code
+      expect(scriptSource).toContain('__capturedStreamUrl');
+      expect(scriptSource).toContain('loadSource');
+      expect(scriptSource).toContain('MutationObserver');
+    });
+
     test('DEFAULT_USER_AGENTS should use Chrome version >= 130', () => {
       const { DEFAULT_USER_AGENTS } = require('../streamResolver');
       DEFAULT_USER_AGENTS.forEach((ua) => {

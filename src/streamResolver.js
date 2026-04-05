@@ -194,6 +194,27 @@ const ANTI_DETECTION_SCRIPT = () => {
     if (param === 37446) return 'ANGLE (Intel, Intel(R) UHD Graphics 630, OpenGL 4.1)';
     return getParameter2.call(this, param);
   };
+
+  // Intercept HLS.js loadSource to capture stream URL
+  // WASM-based players load HLS.js dynamically; this patches it when it appears
+  if (!('__capturedStreamUrl' in window)) {
+    Object.defineProperty(window, '__capturedStreamUrl', { value: null, writable: true });
+  }
+  let _hlsPatched = false;
+  const _hlsObserver = new MutationObserver(() => {
+    if (!_hlsPatched && window.Hls && window.Hls.prototype) {
+      _hlsPatched = true;
+      _hlsObserver.disconnect();
+      const origLoadSource = window.Hls.prototype.loadSource;
+      window.Hls.prototype.loadSource = function(src) {
+        if (src && typeof src === 'string') {
+          window.__capturedStreamUrl = src;
+        }
+        return origLoadSource.call(this, src);
+      };
+    }
+  });
+  _hlsObserver.observe(document.documentElement, { childList: true, subtree: true });
 };
 
 /**
