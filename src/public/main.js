@@ -269,18 +269,34 @@ function destroyPreviewPlayer(videoEl) {
   }
 }
 
-function loadPreview(videoEl, url) {
+async function loadPreview(videoEl, url) {
   if (!videoEl || !url) return;
 
   destroyPreviewPlayer(videoEl);
 
+  // Extract channel ID from url path (/hls/ch-xxx)
+  const channelId = url.replace(/^\/hls\//, '');
+
+  // Fetch the direct stream URL from the API so the browser loads it directly.
+  // Server-side proxying fails because CDNs reject non-browser HTTP clients.
+  let streamUrl = url;
+  try {
+    const resp = await fetch(`/api/channel/${encodeURIComponent(channelId)}/stream`);
+    if (resp.ok) {
+      const data = await resp.json();
+      if (data.url) streamUrl = data.url;
+    }
+  } catch (_) {
+    // Fall back to proxy URL
+  }
+
   if (window.Hls && window.Hls.isSupported()) {
     const hls = new window.Hls();
-    hls.loadSource(url);
+    hls.loadSource(streamUrl);
     hls.attachMedia(videoEl);
     previewPlayers.set(videoEl, { hls });
   } else {
-    videoEl.src = url;
+    videoEl.src = streamUrl;
     previewPlayers.set(videoEl, { hls: null });
   }
 

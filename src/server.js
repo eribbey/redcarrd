@@ -183,6 +183,18 @@ app.post('/api/channel/:id/quality', async (req, res) => {
   res.json(channel);
 });
 
+app.get('/api/channel/:id/stream', (req, res) => {
+  const channel = channelManager.getChannelById(req.params.id);
+  if (!channel || !channel.streamUrl) {
+    return res.status(404).json({ error: 'Stream not available' });
+  }
+  res.json({
+    url: channel.streamUrl,
+    type: channel.streamMode || 'hls',
+    headers: channel.streamHeaders || {},
+  });
+});
+
 app.get('/playlist.m3u8', (req, res) => {
   res.set('Content-Type', 'application/x-mpegurl');
   res.send(channelManager.generatePlaylist(`${req.protocol}://${req.get('host')}`));
@@ -256,6 +268,14 @@ app.get('/hls/:id', async (req, res) => {
 
   if (channel.streamMode === 'transmux') {
     return serveTransmuxedManifest(req, res, channel);
+  }
+
+  // Direct mode: redirect the client to the stream URL so the browser/IPTV client
+  // fetches it directly. Many CDNs reject server-side proxy requests (different TLS
+  // fingerprint, missing browser session) but accept direct browser requests.
+  // Use ?proxy=1 to force server-side proxying if needed.
+  if (req.query.proxy !== '1') {
+    return res.redirect(302, channel.streamUrl);
   }
 
   return handleHlsResponse(req, res, channel.streamUrl, channel, true);
