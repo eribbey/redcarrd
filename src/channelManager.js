@@ -261,6 +261,13 @@ class ChannelManager {
       }
     }
 
+    // Add browser-like headers that CDNs check for (Sec-Fetch-*, Accept-Language, etc.)
+    // Without these, many CDNs reject requests as non-browser/bot traffic
+    if (!headers['Accept-Language']) headers['Accept-Language'] = 'en-US,en;q=0.9';
+    if (!headers['Sec-Fetch-Dest']) headers['Sec-Fetch-Dest'] = 'empty';
+    if (!headers['Sec-Fetch-Mode']) headers['Sec-Fetch-Mode'] = 'cors';
+    if (!headers['Sec-Fetch-Site']) headers['Sec-Fetch-Site'] = 'cross-site';
+
     if (channel?.cookies?.length) {
       headers.Cookie = channel.cookies.join('; ');
     }
@@ -312,15 +319,23 @@ class ChannelManager {
       headers,
       responseType: 'arraybuffer',
       validateStatus: (status) => status >= 200 && status < 500,
+      proxy: false,
       httpsAgent: createHttpsAgent(this.logger),
     });
 
     this.updateCookies(channel, response.headers['set-cookie']);
 
     if (response.status === 403 || response.status === 410) {
+      const bodyPreview = response.data ? response.data.toString('utf8').substring(0, 500) : '';
       this.logger.warn('Upstream rejected request', {
         channelId: channel.id,
         status: response.status,
+        targetUrl: targetUrl.substring(0, 200),
+        referer: headers.Referer,
+        userAgent: headers['User-Agent']?.substring(0, 50),
+        hasCookie: Boolean(headers.Cookie),
+        hasSecFetch: Boolean(headers['Sec-Fetch-Mode']),
+        bodyPreview,
       });
       channel.streamUrl = null;
       channel.resolvedAt = null;
@@ -573,6 +588,7 @@ class ChannelManager {
           responseType: 'arraybuffer',
           timeout: 10000,
           validateStatus: (status) => status >= 200 && status < 500,
+          proxy: false,
           httpsAgent: createHttpsAgent(),
         });
         healthy = response.status >= 200 && response.status < 300;
@@ -591,6 +607,7 @@ class ChannelManager {
           headers,
           timeout: 10000,
           validateStatus: (status) => status >= 200 && status < 500,
+          proxy: false,
           httpsAgent: createHttpsAgent(),
         });
         healthy = response.status >= 200 && response.status < 300;
