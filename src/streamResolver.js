@@ -231,7 +231,7 @@ class StreamResolver {
     this._idleTimer = null;
     this._launching = null;
 
-    this.detectTimeoutMs = parseInt(process.env.STREAM_DETECT_TIMEOUT_MS, 10) || 20000;
+    this.detectTimeoutMs = parseInt(process.env.STREAM_DETECT_TIMEOUT_MS, 10) || 45000;
     this.maxAttempts = Math.max(1, parseInt(process.env.RESTREAM_MAX_ATTEMPTS, 10) || 4);
     this.enableConfigFallback = parseBooleanEnv(process.env.RESTREAM_DETECT_CONFIG_FALLBACK, true);
     this.browserIdleTimeoutMinutes = parseInt(process.env.BROWSER_IDLE_TIMEOUT_MINUTES, 10) || 60;
@@ -840,10 +840,63 @@ class StreamResolver {
   /**
    * Attempt to activate the video player using multiple strategies.
    * WASM-based players use custom play buttons that don't match standard selectors.
-   * Fires multiple strategies since we can't know which will work.
+   *
+   * Many embed sites use ad-gated playback: the first click opens a popup ad
+   * (which we suppress), and only the second click actually starts the player.
+   * We click the center of the viewport multiple times with delays to handle this.
    */
   async _activatePlayer(page) {
-    // Strategy 1: Programmatic video play
+    // Log page state for diagnostics
+    const pageState = await page.evaluate(() => {
+      try {
+        return {
+          videos: document.querySelectorAll('video').length,
+          canvases: document.querySelectorAll('canvas').length,
+          iframes: document.querySelectorAll('iframe').length,
+          buttons: document.querySelectorAll('button').length,
+          title: document.title?.substring(0, 80),
+          bodyClasses: document.body?.className?.substring(0, 100),
+          hasHls: typeof window.Hls !== 'undefined',
+          hasCapturedUrl: Boolean(window.__capturedStreamUrl),
+        };
+      } catch (_) { return {}; }
+    }).catch(() => ({}));
+    this.logger.debug('Page state before activation', pageState);
+
+    // --- Phase 1: Initial click burst (handle ad-gated playback) ---
+    // Many WASM players require multiple clicks: first click opens a suppressed
+    // popup ad, subsequent clicks activate the actual player.
+    const viewport = page.viewportSize() || { width: 1280, height: 720 };
+    const cx = viewport.width / 2;
+    const cy = viewport.height / 2;
+
+    for (let clickRound = 0; clickRound < 3; clickRound++) {
+      // Click center of viewport
+      try {
+        await page.mouse.click(cx, cy);
+      } catch (_) {}
+
+      // Brief pause — let the page react (popup opens & gets suppressed, overlay removed, etc.)
+      await page.waitForTimeout(1500);
+
+      // Dismiss any popups/overlays that appeared
+      await page.evaluate(() => {
+        try {
+          // Remove common ad/overlay elements that may block the player
+          document.querySelectorAll(
+            '[class*="overlay"], [class*="popup"], [class*="modal"], [id*="overlay"], [id*="popup"]'
+          ).forEach((el) => {
+            const style = window.getComputedStyle(el);
+            if (style.position === 'fixed' || style.position === 'absolute') {
+              el.remove();
+            }
+          });
+        } catch (_) {}
+      }).catch(() => {});
+    }
+
+    // --- Phase 2: Targeted element clicks ---
+    // Programmatic video play
     await page.evaluate(() => {
       try {
         const video = document.querySelector('video');
@@ -855,14 +908,11 @@ class StreamResolver {
       } catch (_) {}
     }).catch(() => {});
 
-    await page.waitForTimeout(1000);
-
-    // Strategy 2: Click the largest video or canvas element
+    // Click the largest video or canvas element
     await page.evaluate(() => {
       try {
-        const elements = [...document.querySelectorAll('video, canvas')];
+        const elements = [...document.querySelectorAll('video, canvas, [class*="player"]')];
         if (!elements.length) return;
-        // Sort by area (largest first)
         elements.sort((a, b) => {
           const aRect = a.getBoundingClientRect();
           const bRect = b.getBoundingClientRect();
@@ -872,7 +922,6 @@ class StreamResolver {
         const rect = target.getBoundingClientRect();
         if (rect.width > 0 && rect.height > 0) {
           target.click();
-          // Also dispatch pointer events for players that use them
           target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
           target.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
         }
@@ -881,50 +930,11 @@ class StreamResolver {
 
     await page.waitForTimeout(1000);
 
-    // Strategy 3: Click center of viewport
-    try {
-      const viewport = page.viewportSize();
-      if (viewport) {
-        await page.mouse.click(viewport.width / 2, viewport.height / 2);
-      }
-    } catch (_) {}
-
-    await page.waitForTimeout(1000);
-
-    // Strategy 4: Click visible overlay divs (absolute/fixed positioned, large, high z-index)
-    await page.evaluate(() => {
-      try {
-        const candidates = [...document.querySelectorAll('div, button, a, span')];
-        for (const el of candidates) {
-          const style = window.getComputedStyle(el);
-          const rect = el.getBoundingClientRect();
-          const isOverlay = (style.position === 'absolute' || style.position === 'fixed') &&
-            rect.width > 100 && rect.height > 100 &&
-            style.display !== 'none' && style.visibility !== 'hidden';
-          const hasPlayHint = (el.className + ' ' + el.getAttribute('aria-label') + ' ' + el.textContent)
-            .toLowerCase().match(/play|start|watch|click/);
-          if (isOverlay && hasPlayHint) {
-            el.click();
-            el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
-            el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-            break;
-          }
-        }
-      } catch (_) {}
-    }).catch(() => {});
-
-    await page.waitForTimeout(500);
-
-    // Strategy 5: Specific selectors (existing fallback)
+    // --- Phase 3: Specific selectors & keyboard ---
     const playSelectors = [
-      '.play-button',
-      '.vjs-big-play-button',
-      '[aria-label="Play"]',
-      'button.play',
-      '.jw-icon-display',
-      '.btn-play',
-      '.play-icon',
-      '.player-poster',
+      '.play-button', '.vjs-big-play-button', '[aria-label="Play"]',
+      'button.play', '.jw-icon-display', '.btn-play', '.play-icon',
+      '.player-poster', '[class*="play"]', '#play', '.overlay',
     ];
 
     for (const selector of playSelectors) {
@@ -936,13 +946,12 @@ class StreamResolver {
       } catch (_) {}
     }
 
-    // Strategy 6: Keyboard events (Space/Enter trigger play in many players)
     try {
       await page.keyboard.press('Space');
       await page.keyboard.press('Enter');
     } catch (_) {}
 
-    // Strategy 7: Repeat play/click in all sub-frames (player often lives in nested iframe)
+    // --- Phase 4: Sub-frame activation ---
     const allFrames = page.frames();
     for (const frame of allFrames) {
       try {
@@ -954,16 +963,38 @@ class StreamResolver {
               const p = vid.play();
               if (p && p.catch) p.catch(() => {});
             }
-            // Click any play-like buttons in the frame
             document.querySelectorAll(
-              '.play-button, .vjs-big-play-button, [aria-label="Play"], button.play, .jw-icon-display'
+              '.play-button, .vjs-big-play-button, [aria-label="Play"], button.play, .jw-icon-display, [class*="play"]'
             ).forEach((btn) => { try { btn.click(); } catch (_) {} });
           } catch (_) {}
         }).catch(() => {});
       } catch (_) {}
     }
 
-    // Final wait for player to react and start fetching stream
+    // --- Phase 5: Final click burst after player may have initialized ---
+    await page.waitForTimeout(2000);
+
+    // One more round of clicks after the player has had time to fully init
+    try { await page.mouse.click(cx, cy); } catch (_) {}
+    await page.waitForTimeout(1000);
+    try { await page.mouse.click(cx, cy); } catch (_) {}
+
+    // Log post-activation state
+    const postState = await page.evaluate(() => {
+      try {
+        return {
+          videos: document.querySelectorAll('video').length,
+          videoSrc: document.querySelector('video')?.src?.substring(0, 100) || '',
+          videoCurrentSrc: document.querySelector('video')?.currentSrc?.substring(0, 100) || '',
+          hasHls: typeof window.Hls !== 'undefined',
+          hasCapturedUrl: Boolean(window.__capturedStreamUrl),
+          capturedUrl: window.__capturedStreamUrl?.substring(0, 100) || '',
+        };
+      } catch (_) { return {}; }
+    }).catch(() => ({}));
+    this.logger.debug('Page state after activation', postState);
+
+    // Final wait for stream fetch to happen
     await page.waitForTimeout(2000);
   }
 }

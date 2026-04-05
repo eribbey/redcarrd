@@ -20,6 +20,9 @@ const mockPage = {
     name: () => '',
     evaluate: jest.fn().mockResolvedValue(null),
   }]),
+  viewportSize: jest.fn().mockReturnValue({ width: 1920, height: 1080 }),
+  mouse: { click: jest.fn().mockResolvedValue(null) },
+  keyboard: { press: jest.fn().mockResolvedValue(null) },
 };
 
 const mockContext = {
@@ -481,7 +484,7 @@ describe('StreamResolver', () => {
   describe('environment variable defaults', () => {
     test('should use default timeout when env not set', () => {
       const r = new StreamResolver({ logger });
-      expect(r.detectTimeoutMs).toBe(20000);
+      expect(r.detectTimeoutMs).toBe(45000);
     });
 
     test('should use STREAM_DETECT_TIMEOUT_MS from env', () => {
