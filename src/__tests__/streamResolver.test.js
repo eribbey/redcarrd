@@ -439,6 +439,45 @@ describe('StreamResolver', () => {
     });
   });
 
+  describe('_activatePlayer', () => {
+    test('should attempt to click video and canvas elements', async () => {
+      jest.useRealTimers();
+
+      // Set up mock page with a video element
+      mockPage.evaluate.mockResolvedValue(null);
+      mockPage.$.mockResolvedValue(null);
+      // Mock mouse.click
+      mockPage.mouse = { click: jest.fn().mockResolvedValue(null) };
+      // Mock keyboard
+      mockPage.keyboard = { press: jest.fn().mockResolvedValue(null) };
+
+      // Mock viewport
+      mockPage.viewportSize = jest.fn().mockReturnValue({ width: 1920, height: 1080 });
+
+      await resolver._activatePlayer(mockPage);
+
+      // Should have attempted programmatic play via evaluate
+      expect(mockPage.evaluate).toHaveBeenCalled();
+      // Should have attempted clicking center of viewport
+      expect(mockPage.mouse.click).toHaveBeenCalled();
+    });
+
+    test('should dispatch keyboard Space and Enter', async () => {
+      jest.useRealTimers();
+
+      mockPage.evaluate.mockResolvedValue(null);
+      mockPage.$.mockResolvedValue(null);
+      mockPage.mouse = { click: jest.fn().mockResolvedValue(null) };
+      mockPage.keyboard = { press: jest.fn().mockResolvedValue(null) };
+      mockPage.viewportSize = jest.fn().mockReturnValue({ width: 1920, height: 1080 });
+
+      await resolver._activatePlayer(mockPage);
+
+      expect(mockPage.keyboard.press).toHaveBeenCalledWith('Space');
+      expect(mockPage.keyboard.press).toHaveBeenCalledWith('Enter');
+    });
+  });
+
   describe('environment variable defaults', () => {
     test('should use default timeout when env not set', () => {
       const r = new StreamResolver({ logger });

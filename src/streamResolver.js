@@ -456,8 +456,9 @@ class StreamResolver {
         enableConfigFallback: this.enableConfigFallback,
       });
 
-      // Wait for any further iframes and try autoplay
-      await this._waitForIframesAndAutoplay(page, timeout);
+      // Wait for iframes to load, then activate the player
+      await this._waitForIframes(page, timeout);
+      await this._activatePlayer(page);
 
       const streamInfo = await streamUrlPromise;
 
@@ -790,10 +791,9 @@ class StreamResolver {
   }
 
   /**
-   * Wait for iframes to load, then try to autoplay video in all frames.
-   * The actual player often lives inside a nested iframe (e.g., pooembed.eu).
+   * Wait for embed iframes to load.
    */
-  async _waitForIframesAndAutoplay(page, timeout) {
+  async _waitForIframes(page, timeout) {
     // Give page scripts a moment to set up iframes
     await page.waitForTimeout(2000);
 
@@ -804,13 +804,11 @@ class StreamResolver {
         .filter((src) => src && !src.includes('ad.') && !src.includes('ads.') && !src.includes('google'));
     });
 
-    // Wait for embed iframes to actually load
     if (iframeSrcs.length) {
       this.logger.debug('Waiting for embed iframes to load', { iframeSrcs });
 
       for (const src of iframeSrcs) {
         try {
-          // Wait for frame to appear in page.frames() with a matching URL
           const frameLoadTimeout = Math.min(timeout / 2, 10000);
           await page.waitForFunction(
             (targetSrc) => {
@@ -826,32 +824,104 @@ class StreamResolver {
             { timeout: frameLoadTimeout },
           ).catch(() => {});
 
-          // Give frame content time to initialize player
-          await page.waitForTimeout(3000);
+          await page.waitForTimeout(1000);
         } catch (_) {}
       }
 
-      // Log frame state after waiting
       const frames = page.frames();
       const loadedFrames = frames.map((f) => ({ url: f.url(), name: f.name() })).filter((f) => f.url);
       this.logger.debug('Frames after wait', { count: frames.length, loaded: loadedFrames });
     }
+  }
 
-    // Try autoplay in ALL frames (main page + iframes)
-    const allFrames = page.frames();
-    for (const frame of allFrames) {
+  /**
+   * Attempt to activate the video player using multiple strategies.
+   * WASM-based players use custom play buttons that don't match standard selectors.
+   * Fires multiple strategies since we can't know which will work.
+   */
+  async _activatePlayer(page) {
+    // Strategy 1: Programmatic video play
+    await page.evaluate(() => {
       try {
-        await this._autoplayInFrame(frame);
+        const video = document.querySelector('video');
+        if (video) {
+          video.muted = true;
+          const p = video.play();
+          if (p && p.catch) p.catch(() => {});
+        }
       } catch (_) {}
-    }
+    }).catch(() => {});
 
-    // Click common play button selectors in main page
+    await page.waitForTimeout(1000);
+
+    // Strategy 2: Click the largest video or canvas element
+    await page.evaluate(() => {
+      try {
+        const elements = [...document.querySelectorAll('video, canvas')];
+        if (!elements.length) return;
+        // Sort by area (largest first)
+        elements.sort((a, b) => {
+          const aRect = a.getBoundingClientRect();
+          const bRect = b.getBoundingClientRect();
+          return (bRect.width * bRect.height) - (aRect.width * aRect.height);
+        });
+        const target = elements[0];
+        const rect = target.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          target.click();
+          // Also dispatch pointer events for players that use them
+          target.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+          target.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+        }
+      } catch (_) {}
+    }).catch(() => {});
+
+    await page.waitForTimeout(1000);
+
+    // Strategy 3: Click center of viewport
+    try {
+      const viewport = page.viewportSize();
+      if (viewport) {
+        await page.mouse.click(viewport.width / 2, viewport.height / 2);
+      }
+    } catch (_) {}
+
+    await page.waitForTimeout(1000);
+
+    // Strategy 4: Click visible overlay divs (absolute/fixed positioned, large, high z-index)
+    await page.evaluate(() => {
+      try {
+        const candidates = [...document.querySelectorAll('div, button, a, span')];
+        for (const el of candidates) {
+          const style = window.getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          const isOverlay = (style.position === 'absolute' || style.position === 'fixed') &&
+            rect.width > 100 && rect.height > 100 &&
+            style.display !== 'none' && style.visibility !== 'hidden';
+          const hasPlayHint = (el.className + ' ' + el.getAttribute('aria-label') + ' ' + el.textContent)
+            .toLowerCase().match(/play|start|watch|click/);
+          if (isOverlay && hasPlayHint) {
+            el.click();
+            el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+            el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+            break;
+          }
+        }
+      } catch (_) {}
+    }).catch(() => {});
+
+    await page.waitForTimeout(500);
+
+    // Strategy 5: Specific selectors (existing fallback)
     const playSelectors = [
       '.play-button',
       '.vjs-big-play-button',
       '[aria-label="Play"]',
       'button.play',
       '.jw-icon-display',
+      '.btn-play',
+      '.play-icon',
+      '.player-poster',
     ];
 
     for (const selector of playSelectors) {
@@ -863,44 +933,35 @@ class StreamResolver {
       } catch (_) {}
     }
 
-    // Final wait for any triggered stream loads
-    await page.waitForTimeout(3000);
-  }
+    // Strategy 6: Keyboard events (Space/Enter trigger play in many players)
+    try {
+      await page.keyboard.press('Space');
+      await page.keyboard.press('Enter');
+    } catch (_) {}
 
-  /**
-   * Try to autoplay video within a single frame.
-   */
-  async _autoplayInFrame(frame) {
-    await frame.evaluate(() => {
+    // Strategy 7: Repeat play/click in all sub-frames (player often lives in nested iframe)
+    const allFrames = page.frames();
+    for (const frame of allFrames) {
       try {
-        // HTML5 <video>
-        const vid = document.querySelector('video');
-        if (vid) {
-          vid.muted = true;
-          const p = vid.play();
-          if (p && p.catch) p.catch(() => {});
-        }
-
-        // JWPlayer
-        if (typeof window.jwplayer === 'function') {
+        await frame.evaluate(() => {
           try {
-            const player = window.jwplayer();
-            if (player) {
-              player.setMute(true);
-              player.play();
+            const vid = document.querySelector('video');
+            if (vid) {
+              vid.muted = true;
+              const p = vid.play();
+              if (p && p.catch) p.catch(() => {});
             }
+            // Click any play-like buttons in the frame
+            document.querySelectorAll(
+              '.play-button, .vjs-big-play-button, [aria-label="Play"], button.play, .jw-icon-display'
+            ).forEach((btn) => { try { btn.click(); } catch (_) {} });
           } catch (_) {}
-        }
-
-        // Click play buttons within this frame
-        const playBtns = document.querySelectorAll(
-          '.play-button, .vjs-big-play-button, [aria-label="Play"], button.play, .jw-icon-display'
-        );
-        playBtns.forEach((btn) => {
-          try { btn.click(); } catch (_) {}
-        });
+        }).catch(() => {});
       } catch (_) {}
-    }).catch(() => {});
+    }
+
+    // Final wait for player to react and start fetching stream
+    await page.waitForTimeout(2000);
   }
 }
 
