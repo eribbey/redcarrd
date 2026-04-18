@@ -4,10 +4,13 @@ services:
     build: .
     ports:
       - "3005:3005"
+    volumes:
+      - ./logs:/app/logs
     environment:
       - PORT=3005
       - FRONT_PAGE_URL=https://streamed.pk
       # Point to an existing Flaresolverr/Byparr instance to help bypass challenges.
       # Example: http://flaresolverr:8191/v1 or any reachable host:port.
       - SOLVER_ENDPOINT_URL=http://flaresolverr:8191/v1
+      - LOG_FILE_PATH=/app/logs/redcarrd.log
     restart: unless-stopped

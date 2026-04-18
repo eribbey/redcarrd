@@ -3,3 +3,6 @@ node_modules
 config.json
 npm-debug.log
 .DS_Store
+redcarrd.log
+redcarrd.log.1
+logs/
