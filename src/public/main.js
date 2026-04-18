@@ -274,21 +274,11 @@ async function loadPreview(videoEl, url) {
 
   destroyPreviewPlayer(videoEl);
 
-  // Extract channel ID from url path (/hls/ch-xxx)
-  const channelId = url.replace(/^\/hls\//, '');
-
-  // Fetch the direct stream URL from the API so the browser loads it directly.
-  // Server-side proxying fails because CDNs reject non-browser HTTP clients.
-  let streamUrl = url;
-  try {
-    const resp = await fetch(`/api/channel/${encodeURIComponent(channelId)}/stream`);
-    if (resp.ok) {
-      const data = await resp.json();
-      if (data.url) streamUrl = data.url;
-    }
-  } catch (_) {
-    // Fall back to proxy URL
-  }
+  // Use the server-side proxy route so the server can forward the correct
+  // Referer, cookies, and Sec-Fetch headers to the CDN.  Direct browser
+  // requests to the CDN fail because HLS.js uses XHR/fetch which is subject
+  // to CORS, and the CDN does not send Access-Control-Allow-Origin headers.
+  const streamUrl = `${url}?proxy=1`;
 
   if (window.Hls && window.Hls.isSupported()) {
     const hls = new window.Hls();
