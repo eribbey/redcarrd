@@ -428,14 +428,13 @@ class ChannelManager {
 
       if (result) {
         channel.embedUrl = embedUrl; // Update to the working source
-        channel.streamUrl = result.url;
+        channel.streamUrl = result.streamUrl;
         channel.streamHeaders = result.headers;
-        channel.streamMode = result.type === 'hls' ? 'hls' : 'transmux';
+        channel.streamMode = 'hls';
         channel.resolvedAt = Date.now();
 
         this.logger.info('Stream resolved', {
           channelId: channel.id,
-          type: result.type,
           streamMode: channel.streamMode,
           embedUrl,
         });
@@ -522,7 +521,7 @@ class ChannelManager {
         channel.status = 'healthy';
         channel.failCount = 0;
         channel.nextRetryAt = null;
-        this.logger.info('Channel resolved and promoted to healthy', { channelId: channel.id, streamUrl: result.url });
+        this.logger.info('Channel resolved and promoted to healthy', { channelId: channel.id, streamUrl: result.streamUrl });
       } else {
         channel.failCount = (channel.failCount || 0) + 1;
         if (channel.failCount >= maxFailures) {

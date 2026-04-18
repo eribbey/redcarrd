@@ -109,8 +109,8 @@ describe('ChannelManager', () => {
     test('should set streamMode to hls when HLS URL detected', async () => {
       const mockResolver = {
         resolve: jest.fn().mockResolvedValue({
-          url: 'https://cdn.example.com/stream.m3u8',
-          type: 'hls',
+          streamUrl: 'https://cdn.example.com/stream.m3u8',
+          contentType: 'application/vnd.apple.mpegurl',
           headers: { Referer: 'https://embed.example.com' },
         }),
         close: jest.fn(),
@@ -125,11 +125,11 @@ describe('ChannelManager', () => {
       expect(channel.streamHeaders).toEqual({ Referer: 'https://embed.example.com' });
     });
 
-    test('should set streamMode to transmux when non-HLS URL detected', async () => {
+    test('should set streamMode to hls when stream resolved', async () => {
       const mockResolver = {
         resolve: jest.fn().mockResolvedValue({
-          url: 'https://cdn.example.com/stream.mpd',
-          type: 'dash',
+          streamUrl: 'https://cdn.example.com/stream.m3u8',
+          contentType: 'application/vnd.apple.mpegurl',
           headers: { Referer: 'https://embed.example.com' },
         }),
         close: jest.fn(),
@@ -139,8 +139,8 @@ describe('ChannelManager', () => {
       const channel = { id: 'test-2', embedUrl: 'https://embed.example.com/player/2' };
       await channelManager.resolveStream(channel);
 
-      expect(channel.streamUrl).toBe('https://cdn.example.com/stream.mpd');
-      expect(channel.streamMode).toBe('transmux');
+      expect(channel.streamUrl).toBe('https://cdn.example.com/stream.m3u8');
+      expect(channel.streamMode).toBe('hls');
     });
 
   });
@@ -293,7 +293,7 @@ describe('ChannelManager', () => {
     test('resolveAndUpdateStatus promotes to healthy on success', async () => {
       const manager = new ChannelManager({ lifetimeHours: 24, logger });
       manager.streamResolver = {
-        resolve: jest.fn().mockResolvedValue({ url: 'https://s.test/live.m3u8', type: 'hls', headers: {} }),
+        resolve: jest.fn().mockResolvedValue({ streamUrl: 'https://s.test/live.m3u8', contentType: 'application/vnd.apple.mpegurl', headers: {} }),
       };
 
       const channel = { id: 'ch-1', status: 'pending', embedUrl: 'https://embed.test/1', failCount: 0, healthFailCount: 0 };
@@ -536,7 +536,7 @@ describe('ChannelManager', () => {
     test('channel goes from pending to resolved to healthy', async () => {
       const manager = new ChannelManager({ lifetimeHours: 24, logger });
       manager.streamResolver = {
-        resolve: jest.fn().mockResolvedValue({ url: 'https://s.test/live.m3u8', type: 'hls', headers: {} }),
+        resolve: jest.fn().mockResolvedValue({ streamUrl: 'https://s.test/live.m3u8', contentType: 'application/vnd.apple.mpegurl', headers: {} }),
       };
 
       await manager.buildChannels([
