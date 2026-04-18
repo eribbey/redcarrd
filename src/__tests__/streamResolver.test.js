@@ -95,7 +95,14 @@ function makeFakeChromium({ onM3u8 }) {
     addInitScript: async () => {},
     goto: async () => {
       if (onM3u8 === 'emit') {
-        setImmediate(() => listeners.response.forEach((cb) => cb(fakeResponse)));
+        const noisyResponse = {
+          url: () => 'https://doubleclick.net/tracking/pixel.gif',
+          request: () => fakeRequest,
+        };
+        setImmediate(() => {
+          listeners.response.forEach((cb) => cb(noisyResponse));
+          listeners.response.forEach((cb) => cb(fakeResponse));
+        });
       }
     },
     waitForTimeout: async () => {},
