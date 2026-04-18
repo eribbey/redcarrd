@@ -21,6 +21,7 @@ Before starting, confirm:
 
 **Modified:**
 - `src/streamResolver.js` — rewritten from ~1000 lines to ~150
+- `src/__tests__/streamResolver.test.js` — **overwrite** existing 561-line file that tests features being deleted (UA rotation, config fallback, `__capturedStreamUrl`, multi-strategy activation, browser reuse, MP4 grace period, etc.). Replace contents wholesale with tests for the new design.
 - `src/embedResolver.js` — remove dead stream-resolution helpers; keep URL/onclick helpers and the two functions used by scraper at runtime (`extractHlsStreamsFromSource`, `isProbablePlayerBundleScript`)
 - `src/scraper.js` — remove imports of deleted helpers
 - `src/__tests__/embedResolver.test.js` — delete test blocks for removed helpers
@@ -28,9 +29,6 @@ Before starting, confirm:
 - `src/__tests__/scraper.playwright.test.js` — delete test blocks referencing removed helpers
 - `src/__tests__/scraper.playwright.integration.test.js` — delete test blocks referencing removed helpers
 - `package.json` — add `test:resolver` script
-
-**Created:**
-- `src/__tests__/streamResolver.test.js` — new unit test file
 
 ---
 
@@ -94,14 +92,14 @@ Audit is observation only.
 
 ---
 
-### Task 3: Add failing unit tests for pure helpers in new `streamResolver.js`
+### Task 3: Replace failing unit tests for pure helpers in new `streamResolver.js`
 
 **Files:**
-- Create: `src/__tests__/streamResolver.test.js`
+- Overwrite: `src/__tests__/streamResolver.test.js` (currently 561 lines of tests for features we're deleting)
 
-**Purpose:** TDD the pure helpers (`isAdUrl`, m3u8-match predicate, header picker) before rewriting the class.
+**Purpose:** TDD the pure helpers (`isAdUrl`, m3u8-match predicate, header picker) before rewriting the class. The existing test file tests features being deleted (UA rotation, config fallback, `__capturedStreamUrl`, multi-strategy activation, browser reuse, MP4 grace period, `closeBrowser`). Overwrite it with only the new tests.
 
-- [ ] **Step 1: Create the test file**
+- [ ] **Step 1: Overwrite the test file (replace all contents)**
 
 Write `src/__tests__/streamResolver.test.js`:
 
@@ -185,7 +183,12 @@ Expected: FAIL. Reason: current `streamResolver.js` does not export `isHlsManife
 
 ```bash
 git add src/__tests__/streamResolver.test.js
-git commit -m "Add failing tests for simplified streamResolver helpers"
+git commit -m "Replace streamResolver tests with failing tests for simplified design
+
+The old 561-line test file exercised features being removed
+(UA rotation, config fallback, __capturedStreamUrl, multi-strategy
+activation, browser reuse, MP4 grace period). Overwritten with a
+focused suite for the simplified resolver."
 ```
 
 ---
