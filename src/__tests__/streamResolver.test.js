@@ -66,3 +66,92 @@ describe('streamResolver pure helpers', () => {
     });
   });
 });
+
+const { StreamResolver } = require('../streamResolver');
+
+function makeFakeChromium({ onM3u8 }) {
+  const listeners = { response: [] };
+  const closedThings = [];
+
+  const fakeRequest = {
+    allHeaders: async () => ({
+      'user-agent': 'Mozilla/5.0 fake',
+      referer: 'https://embedsports.top/embed/x',
+      origin: 'https://embedsports.top',
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-site': 'cross-site',
+      'sec-fetch-dest': 'empty',
+      cookie: 'should-not-leak',
+    }),
+  };
+
+  const fakeResponse = {
+    url: () => 'https://netanyahu.modifiles.fans/secure/TOKEN/1/2/team/index.m3u8',
+    request: () => fakeRequest,
+  };
+
+  const page = {
+    on: (evt, cb) => { if (listeners[evt]) listeners[evt].push(cb); },
+    addInitScript: async () => {},
+    goto: async () => {
+      if (onM3u8 === 'emit') {
+        setImmediate(() => listeners.response.forEach((cb) => cb(fakeResponse)));
+      }
+    },
+    waitForTimeout: async () => {},
+    mouse: { click: async () => {} },
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    close: async () => { closedThings.push('page'); },
+  };
+
+  const context = {
+    newPage: async () => page,
+    addInitScript: async () => {},
+    close: async () => { closedThings.push('context'); },
+  };
+
+  const browser = {
+    newContext: async () => context,
+    close: async () => { closedThings.push('browser'); },
+    isConnected: () => true,
+    on: () => {},
+  };
+
+  const chromium = {
+    launch: async () => browser,
+  };
+
+  return { chromium, closedThings };
+}
+
+describe('StreamResolver.resolve', () => {
+  test('returns streamUrl + headers + contentType when a .m3u8 is seen', async () => {
+    const { chromium, closedThings } = makeFakeChromium({ onM3u8: 'emit' });
+    const resolver = new StreamResolver({ logger: { info() {}, warn() {}, error() {}, debug() {} }, chromium });
+
+    const result = await resolver.resolve('https://embedsports.top/embed/test');
+
+    expect(result.streamUrl).toMatch(/\.m3u8/);
+    expect(result.contentType).toBe('application/vnd.apple.mpegurl');
+    expect(result.headers).toMatchObject({
+      referer: 'https://embedsports.top/embed/x',
+      origin: 'https://embedsports.top',
+    });
+    expect(result.headers.cookie).toBeUndefined();
+    expect(closedThings).toEqual(expect.arrayContaining(['context', 'browser']));
+  });
+
+  test('throws STREAM_NOT_DETECTED when timeout elapses with no m3u8', async () => {
+    const { chromium, closedThings } = makeFakeChromium({ onM3u8: 'never' });
+    const resolver = new StreamResolver({
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+      chromium,
+      detectTimeoutMs: 50,
+      wasmSettleMs: 5,
+      clickCount: 2,
+    });
+
+    await expect(resolver.resolve('https://embedsports.top/embed/test')).rejects.toThrow(/STREAM_NOT_DETECTED/);
+    expect(closedThings).toEqual(expect.arrayContaining(['context', 'browser']));
+  });
+});
