@@ -142,6 +142,8 @@ class StreamResolver {
     const logger = this.logger;
     logger.info('Resolving stream', { embedUrl });
 
+    const deadline = Date.now() + this.detectTimeoutMs;
+
     const browser = await this.chromium.launch({
       headless: true,
       args: PLAYWRIGHT_LAUNCH_ARGS,
@@ -179,18 +181,27 @@ class StreamResolver {
         }
       });
 
-      await page.goto(embedUrl, { waitUntil: 'load', timeout: this.detectTimeoutMs });
+      await page.goto(embedUrl, {
+        waitUntil: 'load',
+        timeout: Math.max(1000, deadline - Date.now()),
+      });
       await page.waitForTimeout(this.wasmSettleMs);
 
       // Ad-dismissal click loop. Runs in parallel with the timeout race.
       const clicking = this._runClickLoop(page, deferred);
-      const timing = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('STREAM_NOT_DETECTED')), this.detectTimeoutMs)
-      );
 
-      const result = await Promise.race([deferred.promise, timing]);
-      clicking.cancel();
-      return result;
+      let timeoutId;
+      const timing = new Promise((_, reject) => {
+        const remainingMs = Math.max(0, deadline - Date.now());
+        timeoutId = setTimeout(() => reject(new Error('STREAM_NOT_DETECTED')), remainingMs);
+      });
+
+      try {
+        return await Promise.race([deferred.promise, timing]);
+      } finally {
+        clearTimeout(timeoutId);
+        clicking.cancel();
+      }
     } finally {
       if (context) {
         try { await context.close(); } catch (err) { logger.warn('context close failed', { error: err.message }); }
@@ -225,8 +236,4 @@ module.exports = {
   isAdUrl,
   isHlsManifestUrl,
   pickCapturedHeaders,
-  AD_URL_PATTERNS,
-  PLAYWRIGHT_LAUNCH_ARGS,
-  ANTI_DETECTION_SCRIPT,
-  DEFAULT_USER_AGENT,
 };

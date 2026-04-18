@@ -138,7 +138,7 @@ describe('StreamResolver.resolve', () => {
 
     const result = await resolver.resolve('https://embedsports.top/embed/test');
 
-    expect(result.streamUrl).toMatch(/\.m3u8/);
+    expect(result.streamUrl).toBe('https://netanyahu.modifiles.fans/secure/TOKEN/1/2/team/index.m3u8');
     expect(result.contentType).toBe('application/vnd.apple.mpegurl');
     expect(result.headers).toMatchObject({
       referer: 'https://embedsports.top/embed/x',
