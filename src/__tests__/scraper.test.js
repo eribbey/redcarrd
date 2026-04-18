@@ -5,10 +5,7 @@ const dayjs = require('dayjs');
 const utc = require('dayjs/plugin/utc');
 const timezone = require('dayjs/plugin/timezone');
 const {
-  parseEmbedPage,
-  resolveStreamFromEmbed,
   createProgrammeFromEvent,
-  extractHlsStreamsFromJwPlayerBundle,
   scrapeFrontPage,
   buildEventsFromApi,
 } = require('../scraper');
@@ -16,33 +13,6 @@ const {
 dayjs.extend(utc);
 dayjs.extend(timezone);
 
-const embedHtml = `
-<div>
-  <iframe id="streamIframe" src="https://cdn.example.com/stream.m3u8"></iframe>
-  <select id="sourceSelect">
-    <option value="https://streamed.pk/embed?a">Primary</option>
-  </select>
-  <select id="qualitySelect">
-    <option value="https://streamed.pk/embed?a&quality=1080">1080p</option>
-    <option value="https://streamed.pk/embed?a&quality=720">720p</option>
-  </select>
-</div>
-`;
-
-const embedHtmlWithOnclickOptions = `
-<div>
-  <select id="sourceSelect">
-    <option onclick="changeSource('/embed/stream1')">Primary</option>
-    <option data-url="/embed/stream2">Backup</option>
-  </select>
-</div>
-`;
-
-const embedHtmlWithRelativeStream = `
-<div>
-  <iframe id="streamIframe" src="/live/path/relative.m3u8"></iframe>
-</div>
-`;
 
 describe('scraper helpers', () => {
   test('buildEventsFromApi keeps all sources and maps start time', () => {
@@ -124,29 +94,6 @@ describe('scraper helpers', () => {
     expect(events[0].qualityOptions).toHaveLength(0);
   });
 
-  test('parses embed page', () => {
-    const result = parseEmbedPage(embedHtml);
-    expect(result.streamUrl).toContain('stream.m3u8');
-    expect(result.sourceOptions[0].embedUrl).toContain('embed?a');
-    expect(result.qualityOptions).toHaveLength(2);
-  });
-
-  test('parses embed options when value attribute is missing', () => {
-    const result = parseEmbedPage(embedHtmlWithOnclickOptions);
-    expect(result.sourceOptions.map((opt) => opt.embedUrl)).toEqual(['/embed/stream1', '/embed/stream2']);
-  });
-
-  test('normalizes relative stream URLs against embed host', () => {
-    const result = parseEmbedPage(embedHtmlWithRelativeStream, undefined, 'https://embedsports.top/embed/game-1');
-    expect(result.streamUrl).toBe('https://embedsports.top/live/path/relative.m3u8');
-  });
-
-  test('resolves stream from embed via HTTP', async () => {
-    nock('https://streamed.pk').get('/embed?a').reply(200, embedHtml);
-    const result = await resolveStreamFromEmbed('https://streamed.pk/embed?a');
-    expect(result.streamUrl).toContain('stream.m3u8');
-  });
-
   test('creates programme with default lifetime', () => {
     const programme = createProgrammeFromEvent({ title: 'Match A', category: 'football' }, 'ch-football', 24, 'UTC');
     expect(programme.channelId).toBe('ch-football');
@@ -171,13 +118,4 @@ describe('scraper helpers', () => {
     expect(stop.diff(start, 'hour')).toBe(2);
   });
 
-  test('extracts HLS streams from JWPlayer bundles', () => {
-    const bundle = `!function(){jwplayer("v").setup({file:"https:\\/\\/cdn.example.com\\/live\\/alpha.m3u8",sources:[{file:'/beta/stream.m3u8'}]})}();`;
-    const streams = extractHlsStreamsFromJwPlayerBundle(bundle);
-
-    expect(streams).toEqual([
-      'https://cdn.example.com/live/alpha.m3u8',
-      'https://streamed.pk/beta/stream.m3u8',
-    ]);
-  });
 });
