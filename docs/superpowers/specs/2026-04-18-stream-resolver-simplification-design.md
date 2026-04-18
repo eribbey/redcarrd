@@ -58,7 +58,7 @@ resolve(embedUrl, options):
   6. Ad-dismissal click loop:
      - Click viewport center every ~800ms
      - Stop on m3u8 capture OR after STREAM_DETECT_CLICK_COUNT clicks (default 12)
-  7. Wait up to STREAM_DETECT_TIMEOUT_MS (default 20000) for match
+  7. Wait up to STREAM_DETECT_TIMEOUT_MS (default 45000) for match
   8. Capture matched-URL's request headers (referer, origin, UA, sec-fetch-*)
   9. Close context + browser in a finally block
   10. Return { streamUrl, headers, contentType: 'application/vnd.apple.mpegurl' }
@@ -74,7 +74,7 @@ resolve(embedUrl, options):
 ### Environment variables
 
 Kept:
-- `STREAM_DETECT_TIMEOUT_MS` (default 20000)
+- `STREAM_DETECT_TIMEOUT_MS` (default 45000, unchanged from current implementation)
 
 New:
 - `STREAM_DETECT_CLICK_COUNT` (default 12) — ad-dismissal aggressiveness
