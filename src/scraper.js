@@ -16,12 +16,8 @@ const {
   resolveEmbedFromOnclick,
   collectOptions,
   extractHlsStreamsFromSource,
-  extractHlsStreamsFromJwPlayerBundle,
   isProbablePlayerBundleScript,
-  collectStreamCandidates,
   buildDefaultStreamHeaders,
-  parseEmbedPage,
-  resolveStreamFromEmbed: _resolveStreamFromEmbed,
 } = require('./embedResolver');
 
 const DEFAULT_STREAM_UA =
@@ -924,15 +920,6 @@ async function parseFrontPage(html, timezoneName = 'UTC', logger, context = {}) 
   return events;
 }
 
-// Wrapper for resolveStreamFromEmbed that injects scraper-local fetch functions.
-async function resolveStreamFromEmbed(embedUrl, logger, options = {}) {
-  return _resolveStreamFromEmbed(embedUrl, logger, {
-    ...options,
-    fetchHtmlFn: fetchHtml,
-    fetchRenderedHtmlFn: fetchRenderedHtml,
-  });
-}
-
 async function fetchMatchesFromApi(baseUrl, endpoint = 'live', logger) {
   const normalizedBase = normalizeUrl(baseUrl || 'https://streamed.pk') || 'https://streamed.pk';
   const url = `${normalizedBase.replace(/\/$/, '')}/api/matches/${endpoint}`;
@@ -1085,12 +1072,9 @@ function createProgrammeFromEvent(event, channelId, lifetimeHours = 24, timezone
 
 module.exports = {
   parseFrontPage,
-  parseEmbedPage,
-  resolveStreamFromEmbed,
   scrapeFrontPage,
   createProgrammeFromEvent,
   buildDefaultStreamHeaders,
-  extractHlsStreamsFromJwPlayerBundle,
   buildEventsFromApi,
   fetchMatchesFromApi,
   fetchStreamsForSource,
