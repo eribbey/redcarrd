@@ -207,8 +207,9 @@ SCRAPER_RENDER_WITH_JS=true           # Use Playwright vs axios
 # Stream Resolution Configuration
 STREAM_URL_TTL_MINUTES=30              # TTL for resolved stream URLs (default 30)
 FFMPEG_MAX_CONCURRENT=3                # Max concurrent FFmpeg transmux processes (default 3)
-STREAM_DETECT_TIMEOUT_MS=20000         # Timeout for stream URL detection (default 20000)
-BROWSER_IDLE_TIMEOUT_MINUTES=60        # Browser idle timeout before cleanup (default 60)
+STREAM_DETECT_TIMEOUT_MS=45000         # Total time budget for stream URL detection (default 45000)
+STREAM_DETECT_WASM_SETTLE_MS=1500      # Delay after page load before clicking to let WASM init (default 1500)
+STREAM_DETECT_CLICK_COUNT=12           # Ad-dismissal click attempts during detection (default 12)
 
 # Lifecycle Loop Configuration
 EVENT_POLL_INTERVAL_MINUTES=10            # How often to scrape API for live events

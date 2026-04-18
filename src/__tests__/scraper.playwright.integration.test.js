@@ -1,7 +1,7 @@
 process.env.SCRAPER_RENDER_WITH_JS = 'true';
 
 const http = require('http');
-const { scrapeFrontPage, resolveStreamFromEmbed } = require('../scraper');
+const { scrapeFrontPage } = require('../scraper');
 
 jest.setTimeout(60000);
 
@@ -143,10 +143,5 @@ describe.skip('scraper playwright end-to-end', () => {
     expect(event.sourceOptions.length).toBeGreaterThan(0);
     expect(event.qualityOptions.length).toBeGreaterThan(0);
 
-    const resolved = await resolveStreamFromEmbed(event.embedUrl, undefined, { useRenderer: true });
-
-    expect(resolved.streamUrl).toBe(`${serverUrl}/hls/primary.m3u8`);
-    expect(resolved.sourceOptions.length).toBeGreaterThan(0);
-    expect(resolved.qualityOptions.length).toBeGreaterThan(0);
   });
 });

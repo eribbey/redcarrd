@@ -7,12 +7,8 @@ const {
   resolveEmbedFromOnclick,
   collectOptions,
   extractHlsStreamsFromSource,
-  extractHlsStreamsFromJwPlayerBundle,
   isProbablePlayerBundleScript,
-  collectStreamCandidates,
   buildDefaultStreamHeaders,
-  parseEmbedPage,
-  resolveStreamFromEmbed,
 } = require('../embedResolver');
 const cheerio = require('cheerio');
 
@@ -223,14 +219,6 @@ describe('embedResolver', () => {
     });
   });
 
-  describe('extractHlsStreamsFromJwPlayerBundle()', () => {
-    test('should delegate to extractHlsStreamsFromSource', () => {
-      const source = 'file: "https://cdn.example.com/stream.m3u8"';
-      const result = extractHlsStreamsFromJwPlayerBundle(source);
-      expect(result).toContain('https://cdn.example.com/stream.m3u8');
-    });
-  });
-
   describe('isProbablePlayerBundleScript()', () => {
     test('should detect player bundle by URL keywords', () => {
       expect(isProbablePlayerBundleScript(
@@ -257,29 +245,6 @@ describe('embedResolver', () => {
     });
   });
 
-  describe('collectStreamCandidates()', () => {
-    test('should collect video src attributes', () => {
-      const html = '<video src="https://cdn.example.com/live.m3u8"></video>';
-      const $ = cheerio.load(html);
-      const result = collectStreamCandidates($, html);
-      expect(result).toContain('https://cdn.example.com/live.m3u8');
-    });
-
-    test('should collect source element src attributes', () => {
-      const html = '<video><source src="https://cdn.example.com/stream.mp4"></video>';
-      const $ = cheerio.load(html);
-      const result = collectStreamCandidates($, html);
-      expect(result).toContain('https://cdn.example.com/stream.mp4');
-    });
-
-    test('should extract m3u8 URLs from raw HTML', () => {
-      const html = '<script>var url = "https://cdn.example.com/live.m3u8?token=abc";</script>';
-      const $ = cheerio.load(html);
-      const result = collectStreamCandidates($, html);
-      expect(result.some((url) => url.includes('live.m3u8'))).toBe(true);
-    });
-  });
-
   describe('buildDefaultStreamHeaders()', () => {
     test('should include User-Agent and Accept headers', () => {
       const headers = buildDefaultStreamHeaders();
@@ -294,102 +259,4 @@ describe('embedResolver', () => {
     });
   });
 
-  describe('parseEmbedPage()', () => {
-    test('should extract stream URL from iframe', () => {
-      const html = '<div><iframe id="streamIframe" src="https://cdn.example.com/stream.m3u8"></iframe></div>';
-      const result = parseEmbedPage(html, null, 'https://example.com');
-      expect(result.streamUrl).toBe('https://cdn.example.com/stream.m3u8');
-      expect(result.streamMimeType).toBe('application/vnd.apple.mpegurl');
-    });
-
-    test('should extract source and quality options', () => {
-      const html = `
-        <div>
-          <iframe id="streamIframe" src="https://cdn.example.com/stream.m3u8"></iframe>
-          <select id="sourceSelect">
-            <option value="https://streamed.pk/embed?a">Primary</option>
-          </select>
-          <select id="qualitySelect">
-            <option value="https://streamed.pk/embed?a&quality=1080">1080p</option>
-            <option value="https://streamed.pk/embed?a&quality=720">720p</option>
-          </select>
-        </div>
-      `;
-      const result = parseEmbedPage(html, null);
-      expect(result.sourceOptions).toHaveLength(1);
-      expect(result.qualityOptions).toHaveLength(2);
-    });
-
-    test('should handle payload with discoveredStreams', () => {
-      const payload = {
-        html: '<div></div>',
-        discoveredStreams: [
-          { url: 'https://cdn.example.com/live.m3u8', mimeType: 'application/vnd.apple.mpegurl', isHls: true },
-        ],
-      };
-      const result = parseEmbedPage(payload, null, 'https://example.com');
-      expect(result.streamUrl).toBe('https://cdn.example.com/live.m3u8');
-    });
-
-    test('should return null streamUrl when no streams found', () => {
-      const html = '<div>No streams here</div>';
-      const result = parseEmbedPage(html, null);
-      expect(result.streamUrl).toBeNull();
-    });
-  });
-
-  describe('resolveStreamFromEmbed()', () => {
-    test('should use fetchHtmlFn when renderer is disabled', async () => {
-      const embedHtml = '<div><iframe id="streamIframe" src="https://cdn.example.com/stream.m3u8"></iframe></div>';
-      const fetchHtmlFn = jest.fn().mockResolvedValue(embedHtml);
-      const fetchRenderedHtmlFn = jest.fn();
-
-      const result = await resolveStreamFromEmbed('https://example.com/embed/1', null, {
-        useRenderer: false,
-        fetchHtmlFn,
-        fetchRenderedHtmlFn,
-      });
-
-      expect(fetchHtmlFn).toHaveBeenCalled();
-      expect(fetchRenderedHtmlFn).not.toHaveBeenCalled();
-      expect(result.streamUrl).toBe('https://cdn.example.com/stream.m3u8');
-    });
-
-    test('should use fetchRenderedHtmlFn when renderer is enabled', async () => {
-      const renderedPayload = {
-        html: '<div><iframe id="streamIframe" src="https://cdn.example.com/stream.m3u8"></iframe></div>',
-        discoveredStreams: [
-          { url: 'https://cdn.example.com/stream.m3u8', mimeType: 'application/vnd.apple.mpegurl', isHls: true },
-        ],
-        cookies: [],
-      };
-      const fetchHtmlFn = jest.fn();
-      const fetchRenderedHtmlFn = jest.fn().mockResolvedValue(renderedPayload);
-
-      const result = await resolveStreamFromEmbed('https://example.com/embed/1', null, {
-        useRenderer: true,
-        fetchHtmlFn,
-        fetchRenderedHtmlFn,
-      });
-
-      expect(fetchRenderedHtmlFn).toHaveBeenCalled();
-      expect(result.streamUrl).toBe('https://cdn.example.com/stream.m3u8');
-    });
-
-    test('should fall back to fetchHtmlFn when renderer fails', async () => {
-      const embedHtml = '<div><iframe id="streamIframe" src="https://cdn.example.com/stream.m3u8"></iframe></div>';
-      const fetchHtmlFn = jest.fn().mockResolvedValue(embedHtml);
-      const fetchRenderedHtmlFn = jest.fn().mockRejectedValue(new Error('Browser crash'));
-
-      const result = await resolveStreamFromEmbed('https://example.com/embed/1', null, {
-        useRenderer: true,
-        fetchHtmlFn,
-        fetchRenderedHtmlFn,
-      });
-
-      expect(fetchRenderedHtmlFn).toHaveBeenCalled();
-      expect(fetchHtmlFn).toHaveBeenCalled();
-      expect(result.streamUrl).toBe('https://cdn.example.com/stream.m3u8');
-    });
-  });
 });

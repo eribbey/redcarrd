@@ -2,7 +2,7 @@ process.env.SCRAPER_RENDER_WITH_JS = 'true';
 
 const http = require('http');
 const { chromium } = require('playwright');
-const { parseFrontPage, parseEmbedPage } = require('../scraper');
+const { parseFrontPage } = require('../scraper');
 
 jest.setTimeout(30000);
 
@@ -136,15 +136,4 @@ describe.skip('scraper rendering integration', () => {
     expect(events[0].qualityOptions).toHaveLength(2);
   });
 
-  test('renders dynamic embed page content and parses stream info', async () => {
-    const rendered = await renderPath('/embed');
-
-    expect(rendered).toContain('iframe id="streamIframe"');
-    expect(rendered).toContain('option value="/embed/stream1"');
-
-    const result = parseEmbedPage(rendered);
-    expect(result.streamUrl).toContain('/hls/primary.m3u8');
-    expect(result.sourceOptions).toHaveLength(2);
-    expect(result.qualityOptions).toHaveLength(2);
-  });
 });

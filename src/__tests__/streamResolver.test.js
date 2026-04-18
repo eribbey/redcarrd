@@ -1,561 +1,164 @@
 'use strict';
 
-// Mock Playwright before requiring the module under test
-// Event handler store for mockPage.on — allows multiple event types to coexist
-const _pageHandlers = {};
-const mockPage = {
-  goto: jest.fn().mockResolvedValue(null),
-  on: jest.fn().mockImplementation((event, handler) => {
-    if (!_pageHandlers[event]) _pageHandlers[event] = [];
-    _pageHandlers[event].push(handler);
-  }),
-  removeListener: jest.fn(),
-  $: jest.fn().mockResolvedValue(null),
-  evaluate: jest.fn().mockResolvedValue(false),
-  url: jest.fn().mockReturnValue('https://embed.example.com/player'),
-  waitForTimeout: jest.fn().mockResolvedValue(null),
-  waitForFunction: jest.fn().mockResolvedValue(null),
-  frames: jest.fn().mockReturnValue([{
-    url: () => 'about:blank',
-    name: () => '',
-    evaluate: jest.fn().mockResolvedValue(null),
-  }]),
-  viewportSize: jest.fn().mockReturnValue({ width: 1920, height: 1080 }),
-  mouse: { click: jest.fn().mockResolvedValue(null) },
-  keyboard: { press: jest.fn().mockResolvedValue(null) },
-};
+const {
+  isAdUrl,
+  isHlsManifestUrl,
+  pickCapturedHeaders,
+} = require('../streamResolver');
 
-const mockContext = {
-  newPage: jest.fn().mockResolvedValue(mockPage),
-  addCookies: jest.fn().mockResolvedValue(null),
-  addInitScript: jest.fn().mockResolvedValue(null),
-  cookies: jest.fn().mockResolvedValue([]),
-  close: jest.fn().mockResolvedValue(null),
-};
-
-const mockBrowser = {
-  newContext: jest.fn().mockResolvedValue(mockContext),
-  isConnected: jest.fn().mockReturnValue(true),
-  close: jest.fn().mockResolvedValue(null),
-  on: jest.fn(),
-};
-
-jest.mock('playwright', () => ({
-  chromium: {
-    launch: jest.fn().mockResolvedValue(mockBrowser),
-  },
-}), { virtual: true });
-
-const { StreamResolver, isAdUrl } = require('../streamResolver');
-
-function createLogger() {
-  return {
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
-  };
-}
-
-/**
- * Helper: simulate a network request event on the mock page.
- * When page.on('request', handler) is called, we capture the handler,
- * then invoke it with a mock request object.
- */
-function simulateRequest(url, resourceType = 'xhr') {
-  const handlers = _pageHandlers['request'] || [];
-  const mockRequest = { url: () => url, resourceType: () => resourceType };
-  handlers.forEach((handler) => handler(mockRequest));
-}
-
-function simulateResponse(url, contentType = 'text/html', status = 200) {
-  const handlers = _pageHandlers['response'] || [];
-  const mockResponse = {
-    url: () => url,
-    headers: () => ({ 'content-type': contentType }),
-    status: () => status,
-    text: () => Promise.resolve(''),
-  };
-  handlers.forEach((handler) => handler(mockResponse));
-}
-
-describe('StreamResolver', () => {
-  let resolver;
-  let logger;
-
-  beforeEach(() => {
-    jest.clearAllMocks();
-    jest.useFakeTimers();
-    // Clear event handler store
-    for (const key of Object.keys(_pageHandlers)) delete _pageHandlers[key];
-    // Re-apply default on implementation after clearAllMocks
-    mockPage.on.mockImplementation((event, handler) => {
-      if (!_pageHandlers[event]) _pageHandlers[event] = [];
-      _pageHandlers[event].push(handler);
-    });
-    logger = createLogger();
-    resolver = new StreamResolver({ logger });
-    // Reset env overrides
-    delete process.env.STREAM_DETECT_TIMEOUT_MS;
-    delete process.env.RESTREAM_MAX_ATTEMPTS;
-    delete process.env.RESTREAM_DETECT_CONFIG_FALLBACK;
-    delete process.env.BROWSER_IDLE_TIMEOUT_MINUTES;
-  });
-
-  afterEach(async () => {
-    jest.useRealTimers();
-    await resolver.closeBrowser();
-  });
-
+describe('streamResolver pure helpers', () => {
   describe('isAdUrl', () => {
-    test('should detect doubleclick ad URLs', () => {
-      expect(isAdUrl('https://ad.doubleclick.net/something')).toBe(true);
+    test('returns true for known ad domains', () => {
+      expect(isAdUrl('https://doubleclick.net/ads/abc')).toBe(true);
+      expect(isAdUrl('https://pagead2.googlesyndication.com/x')).toBe(true);
+      expect(isAdUrl('https://cdn.example.com/tracking/pixel.gif')).toBe(true);
     });
 
-    test('should detect googlesyndication ad URLs', () => {
-      expect(isAdUrl('https://pagead2.googlesyndication.com/tag')).toBe(true);
-    });
-
-    test('should detect generic ad paths', () => {
-      expect(isAdUrl('https://example.com/ads/video.m3u8')).toBe(true);
-    });
-
-    test('should detect tracking URLs', () => {
-      expect(isAdUrl('https://example.com/tracking/pixel.gif')).toBe(true);
-    });
-
-    test('should not flag legitimate stream URLs', () => {
-      expect(isAdUrl('https://cdn.example.com/live/stream.m3u8')).toBe(false);
-    });
-
-    test('should not flag normal page URLs', () => {
-      expect(isAdUrl('https://streamed.pk/watch/football')).toBe(false);
+    test('returns false for likely-stream URLs', () => {
+      expect(isAdUrl('https://cdn.example.com/stream/index.m3u8')).toBe(false);
+      expect(isAdUrl('https://netanyahu.modifiles.fans/secure/TOKEN/1/2/name/index.m3u8')).toBe(false);
     });
   });
 
-  describe('resolve()', () => {
-    test('should detect HLS manifest URL from network traffic', async () => {
-      jest.useRealTimers();
-
-      // Schedule request simulation after handlers are registered
-      setTimeout(() => simulateRequest('https://cdn.example.com/live/stream.m3u8'), 200);
-
-      const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 5000,
-        maxAttempts: 1,
-      });
-
-      expect(result).not.toBeNull();
-      expect(result.type).toBe('hls');
-      expect(result.url).toBe('https://cdn.example.com/live/stream.m3u8');
-      expect(result.headers).toBeDefined();
-      expect(result.headers.Referer).toBe('https://embed.example.com/player');
+  describe('isHlsManifestUrl', () => {
+    test('matches .m3u8 with or without query string', () => {
+      expect(isHlsManifestUrl('https://host/path/index.m3u8')).toBe(true);
+      expect(isHlsManifestUrl('https://host/path/index.m3u8?token=abc')).toBe(true);
+      expect(isHlsManifestUrl('https://host/path/tracks-v1a1/mono.ts.m3u8')).toBe(true);
     });
 
-    test('should detect DASH manifest URL from network traffic', async () => {
-      jest.useRealTimers();
-
-      setTimeout(() => simulateRequest('https://cdn.example.com/live/manifest.mpd'), 200);
-
-      const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 5000,
-        maxAttempts: 1,
-      });
-
-      expect(result).not.toBeNull();
-      expect(result.type).toBe('dash');
-      expect(result.url).toBe('https://cdn.example.com/live/manifest.mpd');
+    test('rejects non-HLS URLs', () => {
+      expect(isHlsManifestUrl('https://host/path/video.mp4')).toBe(false);
+      expect(isHlsManifestUrl('https://host/path/stream.mpd')).toBe(false);
+      expect(isHlsManifestUrl('https://host/m3u8')).toBe(false);
+      expect(isHlsManifestUrl('')).toBe(false);
+      expect(isHlsManifestUrl(null)).toBe(false);
     });
+  });
 
-    test('should filter out ad/tracking URLs and detect real stream', async () => {
-      jest.useRealTimers();
-
-      setTimeout(() => {
-        simulateRequest('https://ad.doubleclick.net/video.m3u8');
-        simulateRequest('https://cdn.example.com/stream.m3u8');
-      }, 200);
-
-      const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 5000,
-        maxAttempts: 1,
-      });
-
-      expect(result).not.toBeNull();
-      expect(result.url).toBe('https://cdn.example.com/stream.m3u8');
-      expect(result.url).not.toContain('doubleclick');
-    });
-
-    test('should return null when no stream URL detected (timeout)', async () => {
-      // No network requests emitted — handlers registered but nothing fires
-
-      jest.useRealTimers();
-
-      // Use short timeout to avoid slow test, and disable config fallback
-      resolver.enableConfigFallback = false;
-      const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 500,
-        maxAttempts: 1,
-      });
-
-      expect(result).toBeNull();
-      expect(logger.warn).toHaveBeenCalledWith(
-        'Stream detection attempt failed',
-        expect.objectContaining({ attempt: 1 })
-      );
-    });
-
-    test('should apply solver cookies when provided', async () => {
-      jest.useRealTimers();
-      setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
-
-      const solverCookies = [
-        { name: 'cf_clearance', value: 'abc123', domain: '.example.com', path: '/' },
-      ];
-
-      await resolver.resolve('https://embed.example.com/player', {
-        timeout: 5000,
-        maxAttempts: 1,
-        solverCookies,
-      });
-
-      expect(mockContext.addCookies).toHaveBeenCalledWith(solverCookies);
-    });
-
-    test('should retry with different user agents on failure', async () => {
-      jest.useRealTimers();
-      let resolveCallCount = 0;
-      const origResolve = resolver._resolveWithContext.bind(resolver);
-      resolver._resolveWithContext = async (...args) => {
-        resolveCallCount++;
-        if (resolveCallCount >= 2) {
-          // On second attempt, schedule a request
-          setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
-        }
-        return origResolve(...args);
+  describe('pickCapturedHeaders', () => {
+    test('extracts only the stream-relevant headers', () => {
+      const raw = {
+        'user-agent': 'Mozilla/5.0 (...) Chrome/131',
+        referer: 'https://embedsports.top/embed/x',
+        origin: 'https://embedsports.top',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'cross-site',
+        'sec-fetch-dest': 'empty',
+        'accept-language': 'en-US',
+        cookie: 'should-not-leak',
+        'x-random-tracker': 'ignore',
       };
-
-      resolver.enableConfigFallback = false;
-      const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 500,
-        maxAttempts: 3,
+      const picked = pickCapturedHeaders(raw);
+      expect(picked).toEqual({
+        'user-agent': 'Mozilla/5.0 (...) Chrome/131',
+        referer: 'https://embedsports.top/embed/x',
+        origin: 'https://embedsports.top',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'cross-site',
+        'sec-fetch-dest': 'empty',
       });
-
-      expect(result).not.toBeNull();
-      expect(result.type).toBe('hls');
-      expect(mockBrowser.newContext.mock.calls.length).toBeGreaterThanOrEqual(2);
-      const ua1 = mockBrowser.newContext.mock.calls[0][0].userAgent;
-      const ua2 = mockBrowser.newContext.mock.calls[1][0].userAgent;
-      expect(ua1).not.toBe(ua2);
     });
 
-    test('should include cookies in returned headers', async () => {
-      jest.useRealTimers();
-      setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
-
-      mockContext.cookies.mockResolvedValue([
-        { name: 'session', value: 'xyz' },
-        { name: 'token', value: '123' },
-      ]);
-
-      const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 5000,
-        maxAttempts: 1,
-      });
-
-      expect(result.headers.Cookie).toBe('session=xyz; token=123');
-    });
-
-    test('should inject anti-detection init scripts', async () => {
-      jest.useRealTimers();
-      setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
-
-      await resolver.resolve('https://embed.example.com/player', {
-        timeout: 5000,
-        maxAttempts: 1,
-      });
-
-      expect(mockContext.addInitScript).toHaveBeenCalled();
-    });
-
-    test('should not set Referer/Origin in extraHTTPHeaders (let browser handle naturally)', async () => {
-      jest.useRealTimers();
-      setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
-
-      await resolver.resolve('https://embed.example.com/player?id=123', {
-        timeout: 5000,
-        maxAttempts: 1,
-      });
-
-      const contextOptions = mockBrowser.newContext.mock.calls[0][0];
-      expect(contextOptions.extraHTTPHeaders.Referer).toBeUndefined();
-      expect(contextOptions.extraHTTPHeaders.Origin).toBeUndefined();
-    });
-
-    test('should close context even on error', async () => {
-      mockPage.goto.mockRejectedValueOnce(new Error('Navigation failed'));
-
-      jest.useRealTimers();
-      const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 1000,
-        maxAttempts: 1,
-      });
-
-      expect(result).toBeNull();
-      expect(mockContext.close).toHaveBeenCalled();
-    });
-
-    test('should detect MP4 from network traffic after grace period', async () => {
-      jest.useRealTimers();
-      setTimeout(() => simulateRequest('https://cdn.example.com/video.mp4'), 200);
-
-      const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 15000,
-        maxAttempts: 1,
-      });
-
-      expect(result).not.toBeNull();
-      expect(result.type).toBe('mp4');
-      expect(result.url).toBe('https://cdn.example.com/video.mp4');
-    }, 20000);
-
-    test('should capture cookies from all domains, not just stream URL domain', async () => {
-      jest.useRealTimers();
-      setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
-
-      // Mock cookies() with no args to return all cookies from the context
-      mockContext.cookies.mockImplementation((...args) => {
-        if (args.length === 0) {
-          return Promise.resolve([
-            { name: 'cf_clearance', value: 'abc', domain: '.embed.example.com' },
-            { name: 'session', value: 'xyz', domain: '.cdn.example.com' },
-            { name: '__token', value: '999', domain: '.player.example.com' },
-          ]);
-        }
-        // Legacy call with URL — return filtered
-        return Promise.resolve([
-          { name: 'session', value: 'xyz', domain: '.cdn.example.com' },
-        ]);
-      });
-
-      const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 5000,
-        maxAttempts: 1,
-      });
-
-      // Should have called cookies() with no args to get ALL cookies
-      expect(mockContext.cookies).toHaveBeenCalledWith();
-      // Cookie header should contain all cookies
-      expect(result.headers.Cookie).toContain('cf_clearance=abc');
-      expect(result.headers.Cookie).toContain('session=xyz');
-      expect(result.headers.Cookie).toContain('__token=999');
+    test('returns empty object when input is empty', () => {
+      expect(pickCapturedHeaders({})).toEqual({});
+      expect(pickCapturedHeaders(undefined)).toEqual({});
     });
   });
+});
 
-  describe('browser management', () => {
-    test('should reuse browser across resolve calls', async () => {
-      const { chromium } = require('playwright');
+const { StreamResolver } = require('../streamResolver');
 
-      jest.useRealTimers();
+function makeFakeChromium({ onM3u8 }) {
+  const listeners = { response: [] };
+  const closedThings = [];
 
-      // Schedule requests for both resolve calls
-      const scheduleRequest = () => {
-        setTimeout(() => simulateRequest('https://cdn.example.com/stream.m3u8'), 200);
-      };
+  const fakeRequest = {
+    allHeaders: async () => ({
+      'user-agent': 'Mozilla/5.0 fake',
+      referer: 'https://embedsports.top/embed/x',
+      origin: 'https://embedsports.top',
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-site': 'cross-site',
+      'sec-fetch-dest': 'empty',
+      cookie: 'should-not-leak',
+    }),
+  };
 
-      scheduleRequest();
-      await resolver.resolve('https://embed1.example.com/player', {
-        timeout: 2000,
-        maxAttempts: 1,
-      });
-      scheduleRequest();
-      await resolver.resolve('https://embed2.example.com/player', {
-        timeout: 2000,
-        maxAttempts: 1,
-      });
+  const fakeResponse = {
+    url: () => 'https://netanyahu.modifiles.fans/secure/TOKEN/1/2/team/index.m3u8',
+    request: () => fakeRequest,
+  };
 
-      // Browser launched only once
-      expect(chromium.launch).toHaveBeenCalledTimes(1);
-    });
-
-    test('should close browser on closeBrowser()', async () => {
-      jest.useRealTimers();
-      // Force browser launch
-      await resolver._getBrowser();
-      await resolver.closeBrowser();
-
-      expect(mockBrowser.close).toHaveBeenCalled();
-    });
-  });
-
-  describe('config fallback', () => {
-    test('should fall back to player config when network detection times out', async () => {
-      // No network requests emitted — handlers registered normally but nothing fires
-
-      // Player config returns a stream (evaluate is called for iframe check first, then config fallback)
-      mockPage.evaluate
-        .mockResolvedValueOnce(false) // hasEmbedIframes check
-        .mockResolvedValueOnce([]) // iframe srcs in _waitForIframesAndAutoplay
-        .mockResolvedValue({ // config fallback
-          url: 'https://cdn.example.com/fallback.m3u8',
-          type: 'hls',
+  const page = {
+    on: (evt, cb) => { if (listeners[evt]) listeners[evt].push(cb); },
+    addInitScript: async () => {},
+    goto: async () => {
+      if (onM3u8 === 'emit') {
+        const noisyResponse = {
+          url: () => 'https://doubleclick.net/tracking/pixel.gif',
+          request: () => fakeRequest,
+        };
+        setImmediate(() => {
+          listeners.response.forEach((cb) => cb(noisyResponse));
+          listeners.response.forEach((cb) => cb(fakeResponse));
         });
+      }
+    },
+    waitForTimeout: async () => {},
+    mouse: { click: async () => {} },
+    viewportSize: () => ({ width: 1280, height: 720 }),
+    close: async () => { closedThings.push('page'); },
+  };
 
-      jest.useRealTimers();
-      resolver.enableConfigFallback = true;
-      const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 500,
-        maxAttempts: 1,
-      });
+  const context = {
+    newPage: async () => page,
+    addInitScript: async () => {},
+    close: async () => { closedThings.push('context'); },
+  };
 
-      expect(result).not.toBeNull();
-      expect(result.url).toBe('https://cdn.example.com/fallback.m3u8');
-      expect(result.type).toBe('hls');
-      expect(logger.info).toHaveBeenCalledWith(
-        'Located stream via player configuration fallback',
-      );
+  const browser = {
+    newContext: async () => context,
+    close: async () => { closedThings.push('browser'); },
+    isConnected: () => true,
+    on: () => {},
+  };
+
+  const chromium = {
+    launch: async () => browser,
+  };
+
+  return { chromium, closedThings };
+}
+
+describe('StreamResolver.resolve', () => {
+  test('returns streamUrl + headers + contentType when a .m3u8 is seen', async () => {
+    const { chromium, closedThings } = makeFakeChromium({ onM3u8: 'emit' });
+    const resolver = new StreamResolver({ logger: { info() {}, warn() {}, error() {}, debug() {} }, chromium });
+
+    const result = await resolver.resolve('https://embedsports.top/embed/test');
+
+    expect(result.streamUrl).toBe('https://netanyahu.modifiles.fans/secure/TOKEN/1/2/team/index.m3u8');
+    expect(result.contentType).toBe('application/vnd.apple.mpegurl');
+    expect(result.headers).toMatchObject({
+      referer: 'https://embedsports.top/embed/x',
+      origin: 'https://embedsports.top',
     });
+    expect(result.headers.cookie).toBeUndefined();
+    expect(closedThings).toEqual(expect.arrayContaining(['context', 'browser']));
   });
 
-  describe('_detectFromPlayerConfig with __capturedStreamUrl', () => {
-    test('should return captured HLS URL from __capturedStreamUrl', async () => {
-      jest.useRealTimers();
-
-      // evaluate is called for iframe check first, then config fallback
-      mockPage.evaluate
-        .mockResolvedValueOnce(false) // hasEmbedIframes check
-        .mockResolvedValueOnce([]) // iframe srcs in _waitForIframesAndAutoplay
-        .mockResolvedValue({ // config fallback — returns __capturedStreamUrl result
-          url: 'https://lb1.modifiles.fans/secure/abc/stream/index.m3u8',
-          type: 'hls',
-        });
-
-      // No network requests — rely on config fallback
-      resolver.enableConfigFallback = true;
-      const result = await resolver.resolve('https://embed.example.com/player', {
-        timeout: 500,
-        maxAttempts: 1,
-      });
-
-      expect(result).not.toBeNull();
-      expect(result.url).toBe('https://lb1.modifiles.fans/secure/abc/stream/index.m3u8');
-      expect(result.type).toBe('hls');
-    });
-  });
-
-  describe('_activatePlayer', () => {
-    test('should attempt to click video and canvas elements', async () => {
-      jest.useRealTimers();
-
-      // Set up mock page with a video element
-      mockPage.evaluate.mockResolvedValue(null);
-      mockPage.$.mockResolvedValue(null);
-      // Mock mouse.click
-      mockPage.mouse = { click: jest.fn().mockResolvedValue(null) };
-      // Mock keyboard
-      mockPage.keyboard = { press: jest.fn().mockResolvedValue(null) };
-
-      // Mock viewport
-      mockPage.viewportSize = jest.fn().mockReturnValue({ width: 1920, height: 1080 });
-
-      await resolver._activatePlayer(mockPage);
-
-      // Should have attempted programmatic play via evaluate
-      expect(mockPage.evaluate).toHaveBeenCalled();
-      // Should have attempted clicking center of viewport
-      expect(mockPage.mouse.click).toHaveBeenCalled();
+  test('throws STREAM_NOT_DETECTED when timeout elapses with no m3u8', async () => {
+    const { chromium, closedThings } = makeFakeChromium({ onM3u8: 'never' });
+    const resolver = new StreamResolver({
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+      chromium,
+      detectTimeoutMs: 50,
+      wasmSettleMs: 5,
+      clickCount: 2,
     });
 
-    test('should dispatch keyboard Space and Enter', async () => {
-      jest.useRealTimers();
-
-      mockPage.evaluate.mockResolvedValue(null);
-      mockPage.$.mockResolvedValue(null);
-      mockPage.mouse = { click: jest.fn().mockResolvedValue(null) };
-      mockPage.keyboard = { press: jest.fn().mockResolvedValue(null) };
-      mockPage.viewportSize = jest.fn().mockReturnValue({ width: 1920, height: 1080 });
-
-      await resolver._activatePlayer(mockPage);
-
-      expect(mockPage.keyboard.press).toHaveBeenCalledWith('Space');
-      expect(mockPage.keyboard.press).toHaveBeenCalledWith('Enter');
-    });
-  });
-
-  describe('environment variable defaults', () => {
-    test('should use default timeout when env not set', () => {
-      const r = new StreamResolver({ logger });
-      expect(r.detectTimeoutMs).toBe(45000);
-    });
-
-    test('should use STREAM_DETECT_TIMEOUT_MS from env', () => {
-      process.env.STREAM_DETECT_TIMEOUT_MS = '15000';
-      const r = new StreamResolver({ logger });
-      expect(r.detectTimeoutMs).toBe(15000);
-      delete process.env.STREAM_DETECT_TIMEOUT_MS;
-    });
-
-    test('should use default max attempts when env not set', () => {
-      const r = new StreamResolver({ logger });
-      expect(r.maxAttempts).toBe(4);
-    });
-
-    test('should use default browser idle timeout', () => {
-      const r = new StreamResolver({ logger });
-      expect(r.browserIdleTimeoutMinutes).toBe(60);
-    });
-  });
-
-  describe('anti-detection', () => {
-    test('ANTI_DETECTION_SCRIPT should set up HLS.js loadSource interception', () => {
-      const { ANTI_DETECTION_SCRIPT } = require('../streamResolver');
-
-      // Create a minimal browser-like environment for the script
-      const mockWindow = {
-        open: () => null,
-        chrome: {},
-        Hls: null, // HLS.js not loaded yet
-      };
-
-      // Provide stubs for browser globals the script references
-      const mockNavigator = {
-        webdriver: true,
-        languages: ['en'],
-        plugins: [],
-        hardwareConcurrency: 2,
-        deviceMemory: 2,
-        platform: 'Linux',
-        permissions: { query: () => Promise.resolve({ state: 'default' }) },
-        userAgentData: null,
-      };
-
-      const scriptSource = ANTI_DETECTION_SCRIPT.toString();
-      // Verify the script contains HLS.js interception code
-      expect(scriptSource).toContain('__capturedStreamUrl');
-      expect(scriptSource).toContain('loadSource');
-      expect(scriptSource).toContain('MutationObserver');
-    });
-
-    test('DEFAULT_USER_AGENTS should use Chrome version >= 130', () => {
-      const { DEFAULT_USER_AGENTS } = require('../streamResolver');
-      DEFAULT_USER_AGENTS.forEach((ua) => {
-        const match = ua.match(/Chrome\/(\d+)/);
-        if (match) {
-          expect(parseInt(match[1], 10)).toBeGreaterThanOrEqual(130);
-        }
-      });
-    });
-
-    test('ANTI_DETECTION_SCRIPT should be a function', () => {
-      const { ANTI_DETECTION_SCRIPT } = require('../streamResolver');
-      expect(typeof ANTI_DETECTION_SCRIPT).toBe('function');
-    });
-
-    test('PLAYWRIGHT_LAUNCH_ARGS should include disable-blink-features for automation detection', () => {
-      const { PLAYWRIGHT_LAUNCH_ARGS } = require('../streamResolver');
-      const hasBlinkFlag = PLAYWRIGHT_LAUNCH_ARGS.some(
-        (arg) => arg.includes('disable-blink-features') && arg.includes('AutomationControlled')
-      );
-      expect(hasBlinkFlag).toBe(true);
-    });
+    await expect(resolver.resolve('https://embedsports.top/embed/test')).rejects.toThrow(/STREAM_NOT_DETECTED/);
+    expect(closedThings).toEqual(expect.arrayContaining(['context', 'browser']));
   });
 });
